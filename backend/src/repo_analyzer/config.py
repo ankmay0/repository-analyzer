@@ -53,7 +53,21 @@ class Settings(BaseSettings):
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     llm_timeout_seconds: float = 600.0
     agent_recursion_limit: int = Field(
-        default=30, ge=4, description="Upper bound on model/tool steps for a single question."
+        default=30, ge=4, description="Upper bound on hub model/tool steps for one question."
+    )
+
+    # --- Repository experts (the spokes) --------------------------------------
+    expert_model: str | None = Field(
+        default=None, description="Model for repository experts. Defaults to llm_model."
+    )
+    expert_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None, description="Effort for repository experts. Defaults to llm_effort."
+    )
+    expert_recursion_limit: int = Field(
+        default=20, ge=4, description="Upper bound on model/tool steps for one consultation."
+    )
+    max_parallel_experts: int = Field(
+        default=4, ge=1, description="How many experts may be working at the same time."
     )
 
     # --- HTTP -----------------------------------------------------------------

@@ -9,13 +9,13 @@ tools   --dev------> web-app             (reaches core-lib only through dev edge
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 FIXTURE_REPOS: dict[str, dict[str, str]] = {
@@ -67,14 +67,22 @@ def write_tree(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
-class ScriptedChatModel(BaseChatModel):
-    """A chat model that replays a fixed list of responses and records its inputs.
+Responder = Callable[[list[BaseMessage]], AIMessage]
 
-    It streams, like the real model, so the token-streaming path is exercised.
+
+class ScriptedChatModel(BaseChatModel):
+    """A chat model that returns scripted responses and records what it was sent.
+
+    Give it either ``responses`` (replayed in order) or a ``responder`` function
+    that picks the reply from the messages it receives. The function form is for
+    models shared by several agents running at once, where call order is not
+    deterministic. It streams, like the real model, so the token-streaming path
+    is exercised.
     """
 
-    responses: list[AIMessage]
-    calls: list[list[BaseMessage]] = []  # noqa: RUF012 - pydantic copies field defaults
+    responses: list[AIMessage] = []  # noqa: RUF012 - pydantic copies field defaults
+    responder: Responder | None = None
+    calls: list[list[BaseMessage]] = []  # noqa: RUF012
 
     @property
     def _llm_type(self) -> str:
@@ -85,6 +93,8 @@ class ScriptedChatModel(BaseChatModel):
 
     def _next(self, messages: list[BaseMessage]) -> AIMessage:
         self.calls.append(list(messages))
+        if self.responder is not None:
+            return self.responder(messages)
         if len(self.calls) > len(self.responses):
             raise AssertionError("ScriptedChatModel ran out of scripted responses")
         return self.responses[len(self.calls) - 1]
@@ -131,3 +141,28 @@ class ScriptedChatModel(BaseChatModel):
 
 def tool_call(name: str, args: dict[str, Any], call_id: str = "call-1") -> AIMessage:
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+
+
+def consult(repo: str, question: str, call_id: str | None = None) -> AIMessage:
+    """A hub message that delegates ``question`` to the expert on ``repo``."""
+    return tool_call(
+        "consult_repository", {"repo": repo, "question": question}, call_id or f"ask-{repo}"
+    )
+
+
+def expert_repo(messages: list[BaseMessage]) -> str:
+    """Which repository's expert is being called, read from its system prompt."""
+    return str(messages[0].content).split("expert on the `", 1)[1].split("`", 1)[0]
+
+
+def searching_expert(text: str = "sign_token") -> Responder:
+    """An expert that runs one exact-text search, then reports what it found."""
+
+    def respond(messages: list[BaseMessage]) -> AIMessage:
+        repo = expert_repo(messages)
+        if isinstance(messages[-1], ToolMessage):
+            found = "No lines contain" not in str(messages[-1].content)
+            return AIMessage(content=f"{repo} {'uses' if found else 'does not use'} {text}.")
+        return tool_call("find_references", {"text": text}, call_id=f"{repo}-search")
+
+    return respond

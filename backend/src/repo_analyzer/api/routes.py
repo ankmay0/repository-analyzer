@@ -64,8 +64,10 @@ def get_impact(repo: str, services: ServicesDep) -> ImpactOut:
 async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
     """Answer a question as a server-sent event stream.
 
-    Events: ``token`` (answer text), ``tool_call`` (a retrieval step), ``sources``
-    (file ranges the step returned), ``error``, and a final ``done``.
+    Events: ``token`` (answer text), ``tool_call`` (a step taken by the hub, including
+    each delegation to a repository expert), ``expert_step`` (a search or read by an
+    expert), ``sources`` (file ranges an expert consulted), ``error``, and a final
+    ``done``.
     """
     # Fail with a proper status code while that is still possible; once the stream
     # has started, errors can only be reported as events.

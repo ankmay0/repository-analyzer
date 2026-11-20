@@ -1,6 +1,14 @@
-"""Tools the agent uses to inspect the indexed repositories.
+"""Tools the agents use to inspect the indexed repositories.
 
-Tools are built by a factory that closes over their dependencies, so there is no
+There are two sets, matching the two kinds of agent:
+
+* graph tools, for the hub: what is indexed and how the repositories depend on
+  each other. They never return file contents.
+* repository tools, for a repository expert: search and read the code of exactly
+  one repository. The repository is fixed when the tools are built and is not a
+  parameter, so an expert cannot be talked into reading another repository.
+
+Tools are built by factories that close over their dependencies, so there is no
 module-level state and tests can build them against a temporary workspace.
 
 Each tool returns ``(content, artifact)``: ``content`` is the text the model
@@ -24,7 +32,7 @@ from repo_analyzer.domain import DependencyEdge
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.ingestion.scanner import language_for, scan_repository
 from repo_analyzer.retrieval.store import VectorStore
-from repo_analyzer.workspace import Workspace, WorkspaceState
+from repo_analyzer.workspace import Workspace
 
 MAX_READ_LINES = 400
 MAX_REFERENCE_HITS = 60
@@ -46,20 +54,20 @@ def _describe_edge(edge: DependencyEdge) -> str:
     )
 
 
-def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) -> list[BaseTool]:
-    def state() -> WorkspaceState:
-        return workspace.state
+def _guarded(operation: Callable[[], ToolOutput]) -> ToolOutput:
+    try:
+        return operation()
+    except AnalyzerError as exc:
+        return f"Error: {exc}", []
 
-    def guarded(operation: Callable[[], ToolOutput]) -> ToolOutput:
-        try:
-            return operation()
-        except AnalyzerError as exc:
-            return f"Error: {exc}", []
+
+def build_graph_tools(workspace: Workspace) -> list[BaseTool]:
+    """Tools for the hub: the workspace inventory and the dependency graph."""
 
     @tool(response_format="content_and_artifact")
     def list_repositories() -> ToolOutput:
         """List the indexed repositories and the dependency edges declared between them."""
-        current = state()
+        current = workspace.state
         if not current.repositories:
             return "No repositories are indexed yet.", []
         lines = ["Indexed repositories:"]
@@ -82,7 +90,7 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
         """
 
         def run() -> ToolOutput:
-            current = state()
+            current = workspace.state
             impacted = current.graph.impact_of(repo)
             if not impacted:
                 return (
@@ -100,20 +108,26 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
                     sources.append(_source(edge.source_repo, edge.manifest_path, 1, 1))
             return "\n".join(lines), sources
 
-        return guarded(run)
+        return _guarded(run)
+
+    return [list_repositories, analyze_impact]
+
+
+def build_repository_tools(
+    settings: Settings, store: VectorStore, workspace: Workspace, repo: str
+) -> list[BaseTool]:
+    """Tools for the expert on ``repo``: search and read that repository only."""
 
     @tool(response_format="content_and_artifact")
-    def search_code(query: str, repo: str | None = None) -> ToolOutput:
-        """Semantic search over the indexed code and documentation.
+    def search_code(query: str) -> ToolOutput:
+        """Semantic search over this repository's code and documentation.
 
         Args:
             query: A natural-language description of what you are looking for.
-            repo: Restrict the search to one repository name. Omit to search all.
         """
 
         def run() -> ToolOutput:
-            if repo is not None:
-                state().repository(repo)
+            workspace.state.repository(repo)
             hits = store.search(query, top_k=settings.retrieval_top_k, repo=repo)
             if not hits:
                 return "No results.", []
@@ -127,61 +141,55 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
             ]
             return "\n\n---\n\n".join(blocks), sources
 
-        return guarded(run)
+        return _guarded(run)
 
     @tool(response_format="content_and_artifact")
-    def find_references(text: str, repo: str | None = None) -> ToolOutput:
-        """Find lines containing an exact, case-sensitive piece of text.
+    def find_references(text: str) -> ToolOutput:
+        """Find lines in this repository containing an exact, case-sensitive piece of text.
 
         Args:
             text: The literal text to look for, such as `import markupsafe` or a function name.
-            repo: Restrict the search to one repository name. Omit to search all.
         """
 
         def run() -> ToolOutput:
             if not text.strip():
                 return "Error: text must not be empty", []
-            current = state()
-            targets = [current.repository(repo)] if repo else list(current.repositories)
+            target = workspace.state.repository(repo)
             lines: list[str] = []
             sources: list[Source] = []
             total = 0
-            for target in targets:
-                for file in scan_repository(
-                    target.name, Path(target.root), max_file_bytes=settings.max_file_bytes
-                ):
-                    for number, line in enumerate(file.text.splitlines(), start=1):
-                        if text not in line:
-                            continue
-                        total += 1
-                        if len(lines) < MAX_REFERENCE_HITS:
-                            snippet = line.strip()[:MAX_REFERENCE_LINE_CHARS]
-                            lines.append(f"{file.repo}/{file.path}:{number}: {snippet}")
-                            sources.append(_source(file.repo, file.path, number, number))
+            for file in scan_repository(
+                target.name, Path(target.root), max_file_bytes=settings.max_file_bytes
+            ):
+                for number, line in enumerate(file.text.splitlines(), start=1):
+                    if text not in line:
+                        continue
+                    total += 1
+                    if len(lines) < MAX_REFERENCE_HITS:
+                        snippet = line.strip()[:MAX_REFERENCE_LINE_CHARS]
+                        lines.append(f"{file.repo}/{file.path}:{number}: {snippet}")
+                        sources.append(_source(file.repo, file.path, number, number))
             if not lines:
                 return f"No lines contain {text!r}.", []
             header = f"{total} matching lines"
             if total > len(lines):
-                header += f" (showing the first {len(lines)}; narrow the text or pass repo)"
+                header += f" (showing the first {len(lines)}; use a more specific text)"
             return header + ":\n" + "\n".join(lines), sources
 
-        return guarded(run)
+        return _guarded(run)
 
     @tool(response_format="content_and_artifact")
-    def read_file(
-        repo: str, path: str, start_line: int = 1, end_line: int | None = None
-    ) -> ToolOutput:
-        """Read part of a file from an indexed repository, with line numbers.
+    def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> ToolOutput:
+        """Read part of a file from this repository, with line numbers.
 
         Args:
-            repo: Repository name.
             path: File path relative to the repository root, as shown in search results.
             start_line: First line to return (1-based).
             end_line: Last line to return (inclusive). At most 400 lines are returned per call.
         """
 
         def run() -> ToolOutput:
-            root = Path(state().repository(repo).root).resolve()
+            root = Path(workspace.state.repository(repo).root).resolve()
             target = (root / path).resolve()
             # Same rules as indexing: stay inside the checkout, and never serve a
             # file type the scanner would have refused (secrets, binaries, lockfiles).
@@ -207,6 +215,6 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
             header = f"{repo}/{relative.as_posix()} lines {first}-{last} of {len(all_lines)}"
             return f"{header}\n{body}", [_source(repo, relative.as_posix(), first, last)]
 
-        return guarded(run)
+        return _guarded(run)
 
-    return [list_repositories, analyze_impact, search_code, find_references, read_file]
+    return [search_code, find_references, read_file]

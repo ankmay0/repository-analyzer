@@ -17,18 +17,32 @@ from repo_analyzer.retrieval.embeddings import FastEmbedEmbedder, HashingEmbedde
 def test_chat_model_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(LLMNotConfiguredError, match="ANTHROPIC_API_KEY"):
-        build_chat_model(Settings(_env_file=None))
+        build_chat_model(Settings(_env_file=None), "hub")
 
 
 def test_chat_model_is_built_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    model = build_chat_model(Settings(_env_file=None, llm_effort="high", llm_max_tokens=2048))
+    settings = Settings(_env_file=None, llm_effort="high", llm_max_tokens=2048)
 
-    assert isinstance(model, ChatAnthropic)
-    assert model.model == "claude-opus-5-5"
-    assert model.max_tokens == 2048
-    assert model.reasoning_effort == "high"
+    for role in ("hub", "expert"):  # experts default to the hub's model and effort
+        model = build_chat_model(settings, role)
+        assert isinstance(model, ChatAnthropic)
+        assert model.model == "claude-opus-5-5"
+        assert model.max_tokens == 2048
+        assert model.reasoning_effort == "high"
+
+
+def test_experts_can_be_given_their_own_model_and_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    settings = Settings(_env_file=None, expert_model="claude-sonnet-5-5", expert_effort="low")
+
+    hub = build_chat_model(settings, "hub")
+    expert = build_chat_model(settings, "expert")
+
+    assert isinstance(hub, ChatAnthropic) and isinstance(expert, ChatAnthropic)
+    assert (hub.model, hub.reasoning_effort) == ("claude-opus-5-5", "medium")
+    assert (expert.model, expert.reasoning_effort) == ("claude-sonnet-5-5", "low")
 
 
 def test_api_key_is_read_from_a_dotenv_file_and_never_printed(
@@ -44,7 +58,7 @@ def test_api_key_is_read_from_a_dotenv_file_and_never_printed(
     assert settings.anthropic_api_key is not None
     assert settings.anthropic_api_key.get_secret_value() == "from-dotenv"
     assert "from-dotenv" not in repr(settings)
-    assert isinstance(build_chat_model(settings), ChatAnthropic)
+    assert isinstance(build_chat_model(settings, "hub"), ChatAnthropic)
 
 
 def test_embedder_is_selected_by_settings() -> None:

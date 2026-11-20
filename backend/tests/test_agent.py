@@ -1,89 +1,185 @@
+"""The hub: delegation to repository experts, streaming, and conversation state."""
+
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from repo_analyzer.agent.service import ChatEvent, ChatService
-from repo_analyzer.agent.tools import build_tools
+from repo_analyzer.agent.service import AgentRole, ChatEvent, ChatService
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
-from support import ScriptedChatModel, tool_call
+from support import ScriptedChatModel, consult, expert_repo, searching_expert, tool_call
 
 
 def make_service(
-    model: ScriptedChatModel,
+    hub: ScriptedChatModel,
+    expert: ScriptedChatModel,
     settings: Settings,
     store: VectorStore,
     workspace: Workspace,
-    recursion_limit: int = 10,
 ) -> ChatService:
-    return ChatService(
-        lambda: model,
-        build_tools(settings, store, workspace),
-        recursion_limit=recursion_limit,
-        prompt_caching=False,
-    )
+    def factory(role: AgentRole) -> ScriptedChatModel:
+        return hub if role == "hub" else expert
+
+    return ChatService(factory, settings, store, workspace, prompt_caching=False)
 
 
 async def collect(service: ChatService, thread_id: str, message: str) -> list[ChatEvent]:
     return [event async for event in service.stream(thread_id, message)]
 
 
-async def test_agent_calls_a_tool_then_answers_from_its_result(
+def answer_text(events: list[ChatEvent]) -> str:
+    return "".join(e.data["text"] for e in events if e.type == "token")
+
+
+async def test_hub_delegates_to_experts_in_parallel_and_answers_from_their_reports(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    model = ScriptedChatModel(
+    hub = ScriptedChatModel(
         responses=[
             tool_call("analyze_impact", {"repo": "core-lib"}),
-            AIMessage(content="mid-lib and web-app are affected."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    *consult("mid-lib", "Where is sign_token used?").tool_calls,
+                    *consult("web-app", "Where is sign_token used?").tool_calls,
+                ],
+            ),
+            AIMessage(content="mid-lib uses it; web-app does not."),
         ]
     )
-    service = make_service(model, settings, store, indexed_workspace)
+    expert = ScriptedChatModel(responder=searching_expert())
+    service = make_service(hub, expert, settings, store, indexed_workspace)
 
-    events = await collect(service, "t1", "What breaks if core-lib fails?")
+    events = await collect(service, "t1", "What breaks if core-lib fails, and where?")
 
-    assert [e.type for e in events] == ["tool_call", "sources", "token", "token", "done"]
-    assert events[0].data == {"name": "analyze_impact", "args": {"repo": "core-lib"}}
-    assert {s["repo"] for s in events[1].data["sources"]} == {"mid-lib", "web-app", "tools"}
-    assert "".join(e.data["text"] for e in events if e.type == "token") == (
-        "mid-lib and web-app are affected."
+    # Hub steps, in order: the graph lookup, then both delegations issued together.
+    hub_steps = [
+        (e.data["name"], e.data["args"].get("repo")) for e in events if e.type == "tool_call"
+    ]
+    assert hub_steps == [
+        ("analyze_impact", "core-lib"),
+        ("consult_repository", "mid-lib"),
+        ("consult_repository", "web-app"),
+    ]
+    # Each expert's own research is relayed, labelled with its repository.
+    expert_steps = {(e.data["repo"], e.data["name"]) for e in events if e.type == "expert_step"}
+    assert expert_steps == {("mid-lib", "find_references"), ("web-app", "find_references")}
+    # Only the hub's words reach the user; the experts' reports are not streamed as answer.
+    assert answer_text(events) == "mid-lib uses it; web-app does not."
+    assert events[-1].type == "done"
+    assert not [e for e in events if e.type == "error"]
+
+    # Files the experts found are surfaced as sources: mid-lib's match is there, and
+    # web-app contributes nothing beyond the manifest that analyze_impact cited.
+    sources = {
+        (s["repo"], s["path"]) for e in events if e.type == "sources" for s in e.data["sources"]
+    }
+    assert ("mid-lib", "src/mid_lib/session.py") in sources
+    assert {path for repo, path in sources if repo == "web-app"} == {"pyproject.toml"}
+
+    # The hub received each expert's report as the result of its delegation...
+    reports = {m.tool_call_id: str(m.content) for m in hub.calls[-1] if isinstance(m, ToolMessage)}
+    assert reports["ask-mid-lib"] == "Report from the mid-lib expert:\n\nmid-lib uses sign_token."
+    assert reports["ask-web-app"].endswith("web-app does not use sign_token.")
+    # ...but never the raw search output the experts worked from.
+    assert not any("session.py:1:" in str(m.content) for call in hub.calls for m in call)
+
+
+async def test_each_expert_sees_only_the_hubs_question_not_the_conversation(
+    settings: Settings, store: VectorStore, indexed_workspace: Workspace
+) -> None:
+    hub = ScriptedChatModel(
+        responses=[consult("mid-lib", "How are sessions created?"), AIMessage(content="done")]
+    )
+    expert = ScriptedChatModel(responder=lambda messages: AIMessage(content="via create_session"))
+    service = make_service(hub, expert, settings, store, indexed_workspace)
+
+    await collect(service, "t1", "The user's original wording, with private context")
+
+    (expert_call,) = expert.calls
+    assert expert_repo(expert_call) == "mid-lib"
+    assert [m.content for m in expert_call if isinstance(m, HumanMessage)] == [
+        "How are sessions created?"
+    ]
+    assert isinstance(hub.calls[0][0], SystemMessage)
+    assert "You cannot read code yourself" in str(hub.calls[0][0].content)
+
+
+async def test_one_expert_failing_does_not_lose_the_others_report(
+    settings: Settings, store: VectorStore, indexed_workspace: Workspace
+) -> None:
+    def flaky(messages: list[BaseMessage]) -> AIMessage:
+        if expert_repo(messages) == "web-app":
+            return AIMessage(content="")  # an expert that comes back with nothing
+        return AIMessage(content="mid-lib report")
+
+    hub = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    *consult("mid-lib", "q").tool_calls,
+                    *consult("web-app", "q").tool_calls,
+                ],
+            ),
+            AIMessage(content="partial answer"),
+        ]
+    )
+    service = make_service(
+        hub, ScriptedChatModel(responder=flaky), settings, store, indexed_workspace
     )
 
-    # The second model call saw the system prompt, the question and the tool's output.
-    first, second = model.calls
-    assert isinstance(first[0], SystemMessage) and isinstance(first[1], HumanMessage)
-    tool_result = second[-1]
-    assert isinstance(tool_result, ToolMessage)
-    assert "If core-lib fails, 3 indexed repositories are affected" in str(tool_result.content)
+    events = await collect(service, "t1", "question")
+
+    assert answer_text(events) == "partial answer"
+    reports = {m.tool_call_id: str(m.content) for m in hub.calls[-1] if isinstance(m, ToolMessage)}
+    assert reports["ask-mid-lib"].endswith("mid-lib report")
+    assert reports["ask-web-app"].startswith("Report from the web-app expert (incomplete)")
+
+
+async def test_consulting_an_unknown_repository_is_reported_back_to_the_hub(
+    settings: Settings, store: VectorStore, indexed_workspace: Workspace
+) -> None:
+    hub = ScriptedChatModel(responses=[consult("nope", "q"), AIMessage(content="no such repo")])
+    expert = ScriptedChatModel(responder=lambda messages: AIMessage(content="unused"))
+    service = make_service(hub, expert, settings, store, indexed_workspace)
+
+    events = await collect(service, "t1", "question")
+
+    assert answer_text(events) == "no such repo"
+    assert expert.calls == []
+    assert "Error: Unknown repository 'nope'" in str(hub.calls[-1][-1].content)
 
 
 async def test_conversation_history_is_kept_per_thread(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    model = ScriptedChatModel(
+    hub = ScriptedChatModel(
         responses=[AIMessage(content="one"), AIMessage(content="two"), AIMessage(content="three")]
     )
-    service = make_service(model, settings, store, indexed_workspace)
+    service = make_service(hub, ScriptedChatModel(), settings, store, indexed_workspace)
 
     await collect(service, "thread-a", "first question")
     await collect(service, "thread-a", "follow-up")
     await collect(service, "thread-b", "unrelated")
 
-    def human_texts(call: list) -> list[str]:  # type: ignore[type-arg]
+    def human_texts(call: list[BaseMessage]) -> list[str]:
         return [str(m.content) for m in call if isinstance(m, HumanMessage)]
 
-    assert human_texts(model.calls[1]) == ["first question", "follow-up"]
-    assert human_texts(model.calls[2]) == ["unrelated"]
+    assert human_texts(hub.calls[1]) == ["first question", "follow-up"]
+    assert human_texts(hub.calls[2]) == ["unrelated"]
 
 
-async def test_runaway_tool_loops_stop_at_the_step_limit(
+async def test_runaway_hub_loops_stop_at_the_step_limit(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    model = ScriptedChatModel(
+    limited = settings.model_copy(update={"agent_recursion_limit": 4})
+    hub = ScriptedChatModel(
         responses=[tool_call("list_repositories", {}, call_id=f"c{n}") for n in range(20)]
     )
-    service = make_service(model, settings, store, indexed_workspace, recursion_limit=4)
+    service = make_service(hub, ScriptedChatModel(), limited, store, indexed_workspace)
 
     events = await collect(service, "t1", "loop forever")
 
@@ -94,15 +190,15 @@ async def test_runaway_tool_loops_stop_at_the_step_limit(
 async def test_a_turn_interrupted_before_its_tools_ran_does_not_poison_the_thread(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    model = ScriptedChatModel(
+    hub = ScriptedChatModel(
         responses=[
             tool_call("list_repositories", {}, call_id="dangling"),
             AIMessage(content="recovered"),
         ]
     )
-    service = make_service(model, settings, store, indexed_workspace)
+    service = make_service(hub, ScriptedChatModel(), settings, store, indexed_workspace)
 
-    # Simulate a client disconnect right after the model asked for a tool.
+    # Simulate a client disconnect right after the hub asked for a tool.
     stream = service.stream("t1", "first")
     async for event in stream:
         if event.type == "tool_call":
@@ -111,8 +207,8 @@ async def test_a_turn_interrupted_before_its_tools_ran_does_not_poison_the_threa
 
     events = await collect(service, "t1", "second")
 
-    assert "".join(e.data["text"] for e in events if e.type == "token") == "recovered"
-    history = model.calls[-1]
+    assert answer_text(events) == "recovered"
+    history = hub.calls[-1]
     dangling = [m for m in history if isinstance(m, ToolMessage) and m.tool_call_id == "dangling"]
     assert len(dangling) == 1  # every tool call in the history has exactly one result
 
@@ -120,12 +216,10 @@ async def test_a_turn_interrupted_before_its_tools_ran_does_not_poison_the_threa
 async def test_missing_credentials_surface_as_an_error_event(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    def no_model() -> ScriptedChatModel:
+    def no_model(role: AgentRole) -> ScriptedChatModel:
         raise LLMNotConfiguredError("ANTHROPIC_API_KEY is not set")
 
-    service = ChatService(
-        no_model, build_tools(settings, store, indexed_workspace), recursion_limit=5
-    )
+    service = ChatService(no_model, settings, store, indexed_workspace)
 
     events = await collect(service, "t1", "hello")
 

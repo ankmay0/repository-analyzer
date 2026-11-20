@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
-from langchain_core.language_models import BaseChatModel
-
 from repo_analyzer.agent.llm import build_chat_model
-from repo_analyzer.agent.service import ChatService
-from repo_analyzer.agent.tools import build_tools
+from repo_analyzer.agent.service import ChatService, ModelFactory
 from repo_analyzer.config import Settings
 from repo_analyzer.ingestion.fetcher import RepoFetcher
 from repo_analyzer.ingestion.jobs import IndexJobRunner
@@ -31,7 +27,7 @@ class Services:
 def build_services(
     settings: Settings,
     *,
-    model_factory: Callable[[], BaseChatModel] | None = None,
+    model_factory: ModelFactory | None = None,
 ) -> Services:
     embedder = build_embedder(settings)
     store = VectorStore(settings.index_dir, embedder)
@@ -44,9 +40,10 @@ def build_services(
     )
     indexing = IndexingService(settings, fetcher, store, workspace)
     chat = ChatService(
-        model_factory or (lambda: build_chat_model(settings)),
-        build_tools(settings, store, workspace),
-        recursion_limit=settings.agent_recursion_limit,
+        model_factory or (lambda role: build_chat_model(settings, role)),
+        settings,
+        store,
+        workspace,
         # Scripted test models do not accept provider-specific call options.
         prompt_caching=model_factory is None,
     )

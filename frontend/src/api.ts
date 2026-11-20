@@ -57,7 +57,10 @@ export interface Source {
 
 export type ChatEvent =
   | { type: "token"; text: string }
+  // A step taken by the hub (the coordinating agent), including each delegation.
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
+  // A search or read performed by the expert on one repository.
+  | { type: "expert_step"; repo: string; name: string; args: Record<string, unknown> }
   | { type: "sources"; sources: Source[] }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -137,6 +140,14 @@ export async function* streamChat(
       case "tool_call":
         yield {
           type: "tool_call",
+          name: String(payload.name),
+          args: (payload.args ?? {}) as Record<string, unknown>,
+        };
+        break;
+      case "expert_step":
+        yield {
+          type: "expert_step",
+          repo: String(payload.repo),
           name: String(payload.name),
           args: (payload.args ?? {}) as Record<string, unknown>,
         };

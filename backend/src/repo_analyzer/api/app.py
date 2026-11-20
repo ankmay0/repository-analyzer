@@ -5,14 +5,12 @@ Tests call ``create_app`` with their own settings and a scripted chat model.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer import __version__
+from repo_analyzer.agent.service import ModelFactory
 from repo_analyzer.api.routes import router
 from repo_analyzer.api.services import build_services
 from repo_analyzer.config import Settings
@@ -39,7 +37,7 @@ _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
 def create_app(
     settings: Settings | None = None,
     *,
-    model_factory: Callable[[], BaseChatModel] | None = None,
+    model_factory: ModelFactory | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     app = FastAPI(title="Repository Analyzer", version=__version__)

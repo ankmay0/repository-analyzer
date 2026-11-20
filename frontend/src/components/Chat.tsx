@@ -3,15 +3,18 @@ import Markdown from "react-markdown";
 
 import { ApiError, streamChat, type Repository, type Source, type Workspace } from "../api";
 
-interface ToolStep {
-  name: string;
-  args: Record<string, unknown>;
+/** One research action, attributed to the agent that took it. */
+interface Step {
+  actor: string; // "Coordinator" (the hub) or "<repository> expert"
+  text: string;
 }
+
+const COORDINATOR = "Coordinator";
 
 interface Turn {
   id: number;
   question: string;
-  steps: ToolStep[];
+  steps: Step[];
   answer: string;
   sources: Source[];
   error: string | null;
@@ -57,12 +60,30 @@ function sourceUrl(source: Source, repositories: Repository[]): string | null {
   return `${base}/blob/${repository.commit}/${path}#L${source.start_line}-L${source.end_line}`;
 }
 
-function describeStep(step: ToolStep): string {
-  const args = Object.entries(step.args)
+function describeCall(name: string, args: Record<string, unknown>): string {
+  const rendered = Object.entries(args)
     .filter(([, value]) => value !== null && value !== undefined)
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     .join(", ");
-  return args ? `${step.name} (${args})` : step.name;
+  return rendered ? `${name} (${rendered})` : name;
+}
+
+function coordinatorStep(name: string, args: Record<string, unknown>): Step {
+  if (name === "consult_repository") {
+    return { actor: COORDINATOR, text: `ask the ${String(args.repo)} expert: ${String(args.question)}` };
+  }
+  return { actor: COORDINATOR, text: describeCall(name, args) };
+}
+
+/** Group steps by agent, keeping agents in the order they first acted. */
+function groupByActor(steps: Step[]): [string, string[]][] {
+  const groups = new Map<string, string[]>();
+  for (const step of steps) {
+    const texts = groups.get(step.actor) ?? [];
+    texts.push(step.text);
+    groups.set(step.actor, texts);
+  }
+  return [...groups.entries()];
 }
 
 export function Chat({ workspace }: { workspace: Workspace | null }) {
@@ -106,7 +127,19 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
             update((turn) => ({ ...turn, answer: turn.answer + event.text }));
             break;
           case "tool_call":
-            update((turn) => ({ ...turn, steps: [...turn.steps, event] }));
+            update((turn) => ({
+              ...turn,
+              steps: [...turn.steps, coordinatorStep(event.name, event.args)],
+            }));
+            break;
+          case "expert_step":
+            update((turn) => ({
+              ...turn,
+              steps: [
+                ...turn.steps,
+                { actor: `${event.repo} expert`, text: describeCall(event.name, event.args) },
+              ],
+            }));
             break;
           case "sources":
             update((turn) => ({ ...turn, sources: mergeSources(turn.sources, event.sources) }));
@@ -184,11 +217,16 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
                 <summary>
                   {turn.steps.length} research {turn.steps.length === 1 ? "step" : "steps"}
                 </summary>
-                <ol>
-                  {turn.steps.map((step, index) => (
-                    <li key={index}>{describeStep(step)}</li>
-                  ))}
-                </ol>
+                {groupByActor(turn.steps).map(([actor, texts]) => (
+                  <div key={actor} className="step-group">
+                    <strong>{actor}</strong>
+                    <ol>
+                      {texts.map((text, index) => (
+                        <li key={index}>{text}</li>
+                      ))}
+                    </ol>
+                  </div>
+                ))}
               </details>
             )}
 

@@ -15,17 +15,22 @@ import anthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
-from langgraph.graph.state import CompiledStateGraph
 
-from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, build_agent_graph
+from repo_analyzer.agent.experts import RepositoryExperts
+from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, AgentGraph
+from repo_analyzer.agent.hub import EXPERT_STEP_EVENT, build_hub_graph
+from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.retrieval.store import VectorStore
+from repo_analyzer.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["token", "tool_call", "sources", "error", "done"]
+EventType = Literal["token", "tool_call", "expert_step", "sources", "error", "done"]
+AgentRole = Literal["hub", "expert"]
+ModelFactory = Callable[[AgentRole], BaseChatModel]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,27 +42,38 @@ class ChatEvent:
 class ChatService:
     def __init__(
         self,
-        model_factory: Callable[[], BaseChatModel],
-        tools: list[BaseTool],
+        model_factory: ModelFactory,
+        settings: Settings,
+        store: VectorStore,
+        workspace: Workspace,
         *,
-        recursion_limit: int,
         prompt_caching: bool = True,
     ) -> None:
         self._model_factory = model_factory
-        self._tools = tools
-        self._recursion_limit = recursion_limit
+        self._settings = settings
+        self._store = store
+        self._workspace = workspace
         self._prompt_caching = prompt_caching
-        # Conversation history lives in process memory: it is lost on restart and is
-        # not shared between workers. Swap in a durable checkpointer to change that.
+        # The hub's conversation history lives in process memory: it is lost on restart
+        # and is not shared between workers. Swap in a durable checkpointer to change
+        # that. Experts keep no history at all.
         self._checkpointer = InMemorySaver()
-        self._graph: CompiledStateGraph[Any, Any, Any, Any] | None = None
+        self._graph: AgentGraph | None = None
 
     def ensure_ready(self) -> None:
-        """Build the agent on first use. Raises ``LLMNotConfiguredError`` without a key."""
+        """Build the agents on first use. Raises ``LLMNotConfiguredError`` without a key."""
         if self._graph is None:
-            self._graph = build_agent_graph(
-                self._model_factory(),
-                self._tools,
+            experts = RepositoryExperts(
+                self._model_factory("expert"),
+                self._settings,
+                self._store,
+                self._workspace,
+                prompt_caching=self._prompt_caching,
+            )
+            self._graph = build_hub_graph(
+                self._model_factory("hub"),
+                experts,
+                self._workspace,
                 self._checkpointer,
                 prompt_caching=self._prompt_caching,
             )
@@ -74,13 +90,13 @@ class ChatService:
             assert self._graph is not None  # noqa: S101 - narrowed for the type checker
             config: RunnableConfig = {
                 "configurable": {"thread_id": thread_id},
-                "recursion_limit": self._recursion_limit,
+                "recursion_limit": self._settings.agent_recursion_limit,
             }
             await self._close_interrupted_turn(self._graph, config)
             async for part in self._graph.astream(
                 {"messages": [HumanMessage(message)]},
                 config,
-                stream_mode=["messages", "updates"],
+                stream_mode=["messages", "updates", "custom"],
                 version="v2",
             ):
                 for event in _to_events(part["type"], part["data"]):
@@ -114,9 +130,7 @@ class ChatService:
         yield ChatEvent("done")
 
     @staticmethod
-    async def _close_interrupted_turn(
-        graph: CompiledStateGraph[Any, Any, Any, Any], config: RunnableConfig
-    ) -> None:
+    async def _close_interrupted_turn(graph: AgentGraph, config: RunnableConfig) -> None:
         """Repair a conversation whose previous turn stopped before its tools ran.
 
         If a client disconnects mid-turn, the saved history can end with a model
@@ -139,7 +153,16 @@ class ChatService:
 
 
 def _to_events(kind: str, data: Any) -> list[ChatEvent]:
-    """Map one LangGraph stream part (``messages`` or ``updates`` mode) to UI events."""
+    """Map one stream part from the hub graph to UI events.
+
+    ``messages`` carries the hub's answer text, ``updates`` its completed steps, and
+    ``custom`` the progress that experts relay while a consultation is running.
+    """
+    if kind == "custom":
+        if isinstance(data, dict) and data.get("type") == EXPERT_STEP_EVENT:
+            step = {key: data[key] for key in ("repo", "name", "args")}
+            return [ChatEvent("expert_step", step)]
+        return []
     if kind == "messages":
         chunk, metadata = data
         if isinstance(chunk, AIMessageChunk) and metadata.get("langgraph_node") == AGENT_NODE:

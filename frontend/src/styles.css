@@ -326,6 +326,10 @@ form > button {
   overflow-wrap: anywhere;
 }
 
+.step-group {
+  margin: 0.4rem 0 0 0.9rem;
+}
+
 .answer {
   overflow-wrap: anywhere;
 }

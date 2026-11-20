@@ -12,22 +12,19 @@ from langchain_core.messages import AIMessage
 from repo_analyzer.api.app import create_app
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
-from support import ScriptedChatModel, tool_call
+from support import ScriptedChatModel, consult, searching_expert
 
 
 @pytest.fixture
-def model() -> ScriptedChatModel:
-    return ScriptedChatModel(
+def app(settings: Settings) -> FastAPI:
+    hub = ScriptedChatModel(
         responses=[
-            tool_call("find_references", {"text": "sign_token"}),
+            consult("mid-lib", "Where is sign_token used?"),
             AIMessage(content="It is used in mid-lib."),
         ]
     )
-
-
-@pytest.fixture
-def app(settings: Settings, model: ScriptedChatModel) -> FastAPI:
-    return create_app(settings, model_factory=lambda: model)
+    expert = ScriptedChatModel(responder=searching_expert())
+    return create_app(settings, model_factory=lambda role: hub if role == "hub" else expert)
 
 
 @pytest.fixture
@@ -97,9 +94,24 @@ async def test_chat_streams_tool_activity_sources_and_the_answer(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(response.text)
-    assert [name for name, _ in events] == ["tool_call", "sources", "token", "token", "done"]
-    assert events[0][1] == {"name": "find_references", "args": {"text": "sign_token"}}
-    assert {s["repo"] for s in events[1][1]["sources"]} == {"core-lib", "mid-lib"}
+    assert [name for name, _ in events] == [
+        "tool_call",  # the hub delegates
+        "expert_step",  # the expert searches its repository
+        "sources",  # what the expert found
+        "token",
+        "token",
+        "done",
+    ]
+    assert events[0][1] == {
+        "name": "consult_repository",
+        "args": {"repo": "mid-lib", "question": "Where is sign_token used?"},
+    }
+    assert events[1][1] == {
+        "repo": "mid-lib",
+        "name": "find_references",
+        "args": {"text": "sign_token"},
+    }
+    assert {s["repo"] for s in events[2][1]["sources"]} == {"mid-lib"}
     assert "".join(d["text"] for n, d in events if n == "token") == "It is used in mid-lib."
 
 
@@ -113,7 +125,7 @@ async def test_chat_requires_an_indexed_workspace(client: httpx.AsyncClient) -> 
 async def test_chat_without_credentials_is_a_503_not_a_broken_stream(
     settings: Settings, fixture_repos: dict[str, Path]
 ) -> None:
-    def no_model() -> ScriptedChatModel:
+    def no_model(role: str) -> ScriptedChatModel:
         raise LLMNotConfiguredError("ANTHROPIC_API_KEY is not set on the server")
 
     app = create_app(settings, model_factory=no_model)
