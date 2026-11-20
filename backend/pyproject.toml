@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repo-analyzer"
+version = "0.1.0"
+description = "Cross-repository question answering and dependency impact analysis (RAG + LangGraph + Claude)."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sse-starlette>=2.1",
+    "langgraph>=1.2",
+    "langchain-core>=1.0",
+    "langchain-anthropic>=1.0",
+    "chromadb>=1.0",
+    "fastembed>=0.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+repo-analyzer = "repo_analyzer.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repo_analyzer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF", "S"]
+ignore = [
+    "S603", # subprocess calls are argv lists with validated input; see ingestion/fetcher.py
+    "S607", # `git` is resolved from PATH by design
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["repo_analyzer"]
+
+[[tool.mypy.overrides]]
+module = ["fastembed.*", "chromadb.*"]
+ignore_missing_imports = true
