@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from repo_analyzer.agent.experts import ExpertStep, RepositoryExperts
+from repo_analyzer.agent.tools import build_rag_repository_tools
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import UnknownRepositoryError
 from repo_analyzer.retrieval.store import VectorStore
@@ -18,7 +19,13 @@ from support import ScriptedChatModel, expert_repo, searching_expert, tool_call
 def make_experts(
     model: ScriptedChatModel, settings: Settings, store: VectorStore, workspace: Workspace
 ) -> RepositoryExperts:
-    return RepositoryExperts(model, settings, store, workspace, prompt_caching=False)
+    return RepositoryExperts(
+        model,
+        settings,
+        workspace,
+        lambda repo: build_rag_repository_tools(settings, store, workspace, repo),
+        prompt_caching=False,
+    )
 
 
 async def test_an_expert_researches_its_repository_and_reports_with_sources(

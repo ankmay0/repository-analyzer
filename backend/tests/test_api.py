@@ -7,12 +7,12 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from repo_analyzer.api.app import create_app
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
-from support import ScriptedChatModel, consult, searching_expert
+from support import ScriptedChatModel, consult, searching_expert, tool_call
 
 
 @pytest.fixture
@@ -54,6 +54,7 @@ async def test_health(client: httpx.AsyncClient) -> None:
 
     assert body["status"] == "ok"
     assert body["embedder"] == "hashing:512"
+    assert body["knowledge_mode"] == "rag"
     assert body["llm_model"] == "claude-opus-5-5"
 
 
@@ -191,3 +192,81 @@ async def test_impact_for_unknown_repository_is_404(client: httpx.AsyncClient) -
 
     assert response.status_code == 404
     assert "Unknown repository" in response.json()["detail"]
+
+
+# --- json mode ------------------------------------------------------------------
+
+
+@pytest.fixture
+def json_app(json_settings: Settings) -> FastAPI:
+    hub = ScriptedChatModel(
+        responses=[
+            tool_call("find_usages", {"repo": "core-lib", "symbol": "sign_token"}),
+            consult("mid-lib", "What does create_session do?"),
+            AIMessage(content="mid-lib and tools use it."),
+        ]
+    )
+
+    def expert(messages: list[BaseMessage]) -> AIMessage:
+        if isinstance(messages[-1], ToolMessage):
+            return AIMessage(content="It signs a session token.")
+        return tool_call("find_symbol", {"name": "create_session"}, call_id="e1")
+
+    expert_model = ScriptedChatModel(responder=expert)
+    return create_app(
+        json_settings, model_factory=lambda role: hub if role == "hub" else expert_model
+    )
+
+
+async def test_json_mode_indexes_and_answers_without_a_vector_store(
+    json_app: FastAPI, json_settings: Settings, fixture_repos: dict[str, Path]
+) -> None:
+    transport = httpx.ASGITransport(app=json_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        health = (await http.get("/api/health")).json()
+        assert (health["knowledge_mode"], health["embedder"]) == ("json", None)
+
+        await index(http, json_app, [str(p) for p in fixture_repos.values()])
+        workspace = (await http.get("/api/workspace")).json()
+        assert workspace["job"]["state"] == "succeeded"
+        assert workspace["knowledge_mode"] == "json"
+        assert all(r["chunk_count"] == 0 for r in workspace["repositories"])
+        assert not json_settings.index_dir.exists()
+
+        impact = (await http.get("/api/workspace/impact/core-lib")).json()
+        assert [i["repo"] for i in impact["impacted"]] == ["mid-lib", "web-app", "tools"]
+
+        response = await http.post("/api/chat", json={"thread_id": "t", "message": "who uses it?"})
+
+    events = parse_sse(response.text)
+    assert [(n, d.get("name")) for n, d in events if n in ("tool_call", "expert_step")] == [
+        ("tool_call", "find_usages"),
+        ("tool_call", "consult_repository"),
+        ("expert_step", "find_symbol"),
+    ]
+    cited = {(s["repo"], s["path"]) for n, d in events if n == "sources" for s in d["sources"]}
+    assert ("tools", "scripts/smoke.py") in cited and ("mid-lib", "src/mid_lib/session.py") in cited
+    assert "".join(d["text"] for n, d in events if n == "token") == "mid-lib and tools use it."
+    assert not [d for n, d in events if n == "error"]
+
+
+async def test_chat_refuses_an_index_built_in_the_other_mode(
+    settings: Settings, json_settings: Settings, fixture_repos: dict[str, Path]
+) -> None:
+    hub = ScriptedChatModel(responses=[AIMessage(content="unused")])
+    rag_app = create_app(settings, model_factory=lambda role: hub)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=rag_app), base_url="http://test"
+    ) as http:
+        await index(http, rag_app, [str(fixture_repos["core-lib"])])
+
+    # Same data directory, server restarted in json mode.
+    json_app = create_app(json_settings, model_factory=lambda role: hub)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=json_app), base_url="http://test"
+    ) as http:
+        response = await http.post("/api/chat", json={"thread_id": "t", "message": "hi"})
+
+    assert response.status_code == 409
+    assert "indexed in 'rag' mode" in response.json()["detail"]
+    assert hub.calls == []

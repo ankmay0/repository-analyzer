@@ -25,6 +25,7 @@ class RepositoryOut(BaseModel):
     commit: str | None
     file_count: int
     chunk_count: int
+    symbol_count: int
 
 
 class EdgeOut(BaseModel):
@@ -69,6 +70,7 @@ class WorkspaceOut(BaseModel):
     repositories: list[RepositoryOut]
     edges: list[EdgeOut]
     indexed_at: str | None
+    knowledge_mode: str
     job: JobOut
 
     @classmethod
@@ -81,11 +83,13 @@ class WorkspaceOut(BaseModel):
                     commit=r.commit,
                     file_count=r.file_count,
                     chunk_count=r.chunk_count,
+                    symbol_count=r.symbol_count,
                 )
                 for r in state.repositories
             ],
             edges=[EdgeOut.from_edge(e) for e in state.graph.edges],
             indexed_at=state.indexed_at,
+            knowledge_mode=state.knowledge_mode,
             job=JobOut.from_status(status),
         )
 
@@ -115,4 +119,5 @@ class HealthOut(BaseModel):
     status: str
     llm_configured: bool
     llm_model: str
-    embedder: str
+    knowledge_mode: str
+    embedder: str | None

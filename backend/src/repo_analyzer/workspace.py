@@ -32,7 +32,8 @@ class IndexedRepository:
     root: str
     commit: str | None
     file_count: int
-    chunk_count: int
+    chunk_count: int = 0  # rag mode
+    symbol_count: int = 0  # json mode
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class WorkspaceState:
     repositories: tuple[IndexedRepository, ...] = ()
     graph: DependencyGraph = field(default_factory=lambda: DependencyGraph((), ()))
     indexed_at: str | None = None  # ISO 8601, UTC
+    knowledge_mode: str = "rag"  # which artifacts this index run produced
 
     def repository(self, name: str) -> IndexedRepository:
         for repository in self.repositories:
@@ -52,6 +54,7 @@ class WorkspaceState:
         return {
             "schema_version": _SCHEMA_VERSION,
             "indexed_at": self.indexed_at,
+            "knowledge_mode": self.knowledge_mode,
             "repositories": [asdict(r) for r in self.repositories],
             "graph": self.graph.to_dict(),
         }
@@ -62,6 +65,8 @@ class WorkspaceState:
             repositories=tuple(IndexedRepository(**r) for r in data["repositories"]),
             graph=DependencyGraph.from_dict(data["graph"]),
             indexed_at=data.get("indexed_at"),
+            # Files written before the mode existed were always vector-store indexes.
+            knowledge_mode=data.get("knowledge_mode", "rag"),
         )
 
 

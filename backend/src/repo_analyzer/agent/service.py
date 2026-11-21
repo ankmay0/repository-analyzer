@@ -15,14 +15,21 @@ import anthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
 from repo_analyzer.agent.experts import RepositoryExperts
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, AgentGraph
 from repo_analyzer.agent.hub import EXPERT_STEP_EVENT, build_hub_graph
+from repo_analyzer.agent.tools import (
+    build_json_repository_tools,
+    build_rag_repository_tools,
+    build_usage_tool,
+)
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.knowledge.store import KnowledgeStore
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
 
@@ -44,15 +51,19 @@ class ChatService:
         self,
         model_factory: ModelFactory,
         settings: Settings,
-        store: VectorStore,
         workspace: Workspace,
+        knowledge: KnowledgeStore,
+        store: VectorStore | None,
         *,
         prompt_caching: bool = True,
     ) -> None:
+        if settings.knowledge_mode == "rag" and store is None:
+            raise ValueError("rag mode requires a vector store")
         self._model_factory = model_factory
         self._settings = settings
-        self._store = store
         self._workspace = workspace
+        self._knowledge = knowledge
+        self._store = store
         self._prompt_caching = prompt_caching
         # The hub's conversation history lives in process memory: it is lost on restart
         # and is not shared between workers. Swap in a durable checkpointer to change
@@ -66,17 +77,27 @@ class ChatService:
             experts = RepositoryExperts(
                 self._model_factory("expert"),
                 self._settings,
-                self._store,
                 self._workspace,
+                self._expert_tools,
                 prompt_caching=self._prompt_caching,
             )
+            json_mode = self._settings.knowledge_mode == "json"
             self._graph = build_hub_graph(
                 self._model_factory("hub"),
                 experts,
                 self._workspace,
                 self._checkpointer,
+                knowledge_mode=self._settings.knowledge_mode,
+                extra_tools=(
+                    [build_usage_tool(self._workspace, self._knowledge)] if json_mode else []
+                ),
                 prompt_caching=self._prompt_caching,
             )
+
+    def _expert_tools(self, repo: str) -> list[BaseTool]:
+        if self._store is not None:
+            return build_rag_repository_tools(self._settings, self._store, self._workspace, repo)
+        return build_json_repository_tools(self._settings, self._workspace, self._knowledge, repo)
 
     async def stream(self, thread_id: str, message: str) -> AsyncIterator[ChatEvent]:
         """Answer ``message`` in conversation ``thread_id``, yielding events as they occur.

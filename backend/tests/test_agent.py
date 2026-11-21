@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from repo_analyzer.agent.service import AgentRole, ChatEvent, ChatService
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
+from repo_analyzer.knowledge.store import KnowledgeStore
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
 from support import ScriptedChatModel, consult, expert_repo, searching_expert, tool_call
@@ -22,7 +23,8 @@ def make_service(
     def factory(role: AgentRole) -> ScriptedChatModel:
         return hub if role == "hub" else expert
 
-    return ChatService(factory, settings, store, workspace, prompt_caching=False)
+    knowledge = KnowledgeStore(settings.knowledge_dir)
+    return ChatService(factory, settings, workspace, knowledge, store, prompt_caching=False)
 
 
 async def collect(service: ChatService, thread_id: str, message: str) -> list[ChatEvent]:
@@ -219,7 +221,9 @@ async def test_missing_credentials_surface_as_an_error_event(
     def no_model(role: AgentRole) -> ScriptedChatModel:
         raise LLMNotConfiguredError("ANTHROPIC_API_KEY is not set")
 
-    service = ChatService(no_model, settings, store, indexed_workspace)
+    service = ChatService(
+        no_model, settings, indexed_workspace, KnowledgeStore(settings.knowledge_dir), store
+    )
 
     events = await collect(service, "t1", "hello")
 

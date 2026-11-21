@@ -18,13 +18,13 @@ from typing import Any
 import anthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, AgentGraph, build_tool_loop
 from repo_analyzer.agent.prompts import expert_prompt
-from repo_analyzer.agent.tools import Source, build_repository_tools
+from repo_analyzer.agent.tools import Source
 from repo_analyzer.config import Settings
-from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,9 @@ class ExpertReport:
 
 
 StepCallback = Callable[[ExpertStep], None]
+# Builds the tools for the expert on one repository; which tools depends on the
+# knowledge mode, which this module does not need to know about.
+ToolsFactory = Callable[[str], list[BaseTool]]
 
 
 class RepositoryExperts:
@@ -55,15 +58,15 @@ class RepositoryExperts:
         self,
         model: BaseChatModel,
         settings: Settings,
-        store: VectorStore,
         workspace: Workspace,
+        tools_for: ToolsFactory,
         *,
         prompt_caching: bool = True,
     ) -> None:
         self._model = model
         self._settings = settings
-        self._store = store
         self._workspace = workspace
+        self._tools_for = tools_for
         self._prompt_caching = prompt_caching
         self._graphs: dict[str, AgentGraph] = {}
         # The hub may consult every expert at once; this bounds concurrent model use.
@@ -122,8 +125,8 @@ class RepositoryExperts:
         if repo not in self._graphs:
             self._graphs[repo] = build_tool_loop(
                 self._model,
-                build_repository_tools(self._settings, self._store, self._workspace, repo),
-                expert_prompt(repo),
+                self._tools_for(repo),
+                expert_prompt(repo, self._settings.knowledge_mode),
                 checkpointer=None,
                 stream_tokens=False,
                 prompt_caching=self._prompt_caching,

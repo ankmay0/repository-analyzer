@@ -37,3 +37,7 @@ class LLMNotConfiguredError(AnalyzerError):
 
 class WorkspaceEmptyError(AnalyzerError):
     """A question was asked before any repository was indexed."""
+
+
+class ReindexRequiredError(AnalyzerError):
+    """The stored index does not match the configured knowledge mode."""

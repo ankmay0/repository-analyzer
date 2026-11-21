@@ -3,7 +3,7 @@
     user ──► hub ──► consult_repository ──► expert on repository A
               │                        ├──► expert on repository B   (in parallel)
               │                        └──► ...
-              └──► list_repositories / analyze_impact   (dependency graph, no code)
+              └──► list_repositories / analyze_impact / find_usages   (graph, no code)
 
 The hub holds the conversation with the user and the dependency graph. It has no
 tool that returns code: anything it learns about a repository's contents comes
@@ -12,6 +12,7 @@ from that repository's expert. Experts never communicate with each other.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -21,7 +22,7 @@ from langgraph.config import get_stream_writer
 
 from repo_analyzer.agent.experts import ExpertStep, RepositoryExperts
 from repo_analyzer.agent.graph import AgentGraph, build_tool_loop
-from repo_analyzer.agent.prompts import HUB_PROMPT
+from repo_analyzer.agent.prompts import hub_prompt
 from repo_analyzer.agent.tools import ToolOutput, build_graph_tools
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.workspace import Workspace
@@ -70,12 +71,14 @@ def build_hub_graph(
     workspace: Workspace,
     checkpointer: BaseCheckpointSaver[Any],
     *,
+    knowledge_mode: str,
+    extra_tools: Sequence[BaseTool] = (),
     prompt_caching: bool = True,
 ) -> AgentGraph:
     return build_tool_loop(
         model,
-        [*build_graph_tools(workspace), build_consult_tool(experts)],
-        HUB_PROMPT,
+        [*build_graph_tools(workspace), *extra_tools, build_consult_tool(experts)],
+        hub_prompt(knowledge_mode),
         checkpointer=checkpointer,
         stream_tokens=True,
         prompt_caching=prompt_caching,

@@ -18,7 +18,7 @@ from repo_analyzer.api.schemas import (
     WorkspaceOut,
 )
 from repo_analyzer.api.services import Services
-from repo_analyzer.errors import WorkspaceEmptyError
+from repo_analyzer.errors import ReindexRequiredError, WorkspaceEmptyError
 
 router = APIRouter()
 
@@ -37,7 +37,8 @@ def health(services: ServicesDep) -> HealthOut:
         status="ok",
         llm_configured=services.settings.anthropic_api_key is not None,
         llm_model=services.settings.llm_model,
-        embedder=services.embedder.name,
+        knowledge_mode=services.settings.knowledge_mode,
+        embedder=services.embedder.name if services.embedder else None,
     )
 
 
@@ -71,8 +72,15 @@ async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
     """
     # Fail with a proper status code while that is still possible; once the stream
     # has started, errors can only be reported as events.
-    if not services.workspace.state.repositories:
+    state = services.workspace.state
+    if not state.repositories:
         raise WorkspaceEmptyError("Index at least one repository before asking questions")
+    configured = services.settings.knowledge_mode
+    if state.knowledge_mode != configured:
+        raise ReindexRequiredError(
+            f"The repositories were indexed in {state.knowledge_mode!r} mode but the server "
+            f"is running in {configured!r} mode. Index them again."
+        )
     services.chat.ensure_ready()
 
     async def events() -> AsyncIterator[ServerSentEvent]:

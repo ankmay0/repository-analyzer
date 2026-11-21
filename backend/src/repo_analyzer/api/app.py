@@ -19,6 +19,7 @@ from repo_analyzer.errors import (
     IndexingInProgressError,
     InvalidRepositorySourceError,
     LLMNotConfiguredError,
+    ReindexRequiredError,
     RepositoryFetchError,
     UnknownRepositoryError,
     WorkspaceEmptyError,
@@ -29,6 +30,7 @@ _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
     UnknownRepositoryError: 404,
     IndexingInProgressError: 409,
     WorkspaceEmptyError: 409,
+    ReindexRequiredError: 409,
     RepositoryFetchError: 502,
     LLMNotConfiguredError: 503,
 }

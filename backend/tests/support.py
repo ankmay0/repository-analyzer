@@ -25,13 +25,22 @@ FIXTURE_REPOS: dict[str, dict[str, str]] = {
             "def sign_token(payload: str, secret: str) -> str:\n"
             '    """Sign a payload and return the token."""\n'
             '    return f"{payload}.{hash((payload, secret))}"\n'
+            "\n\n"
+            "class TokenError(Exception):\n"
+            '    """Raised when a token cannot be verified."""\n\n'
+            "    def describe(self) -> str:\n"
+            '        return "bad token"\n'
         ),
+        # Re-exports sign_token, so ``from core_lib import sign_token`` must be followed
+        # through this file to the definition in tokens.py.
+        "src/core_lib/__init__.py": "from .tokens import sign_token\n",
         ".env": "SECRET_KEY=do-not-index\n",
     },
     "mid-lib": {
         "pyproject.toml": (
             '[project]\nname = "mid_lib"\nversion = "1.0"\ndependencies = ["Core.Lib>=1.0"]\n'
         ),
+        "src/mid_lib/__init__.py": "",  # an empty package marker: not indexed, still a package
         "src/mid_lib/session.py": (
             "from core_lib.tokens import sign_token\n\n\n"
             "def create_session(user: str) -> str:\n"
@@ -54,7 +63,9 @@ FIXTURE_REPOS: dict[str, dict[str, str]] = {
     "tools": {
         "package.json": json.dumps({"name": "tools", "devDependencies": {"left-pad": "1.0.0"}}),
         "requirements-dev.txt": "web-app==1.0\n",
-        "scripts/smoke.py": "print('smoke test against web-app')\n",
+        "scripts/smoke.py": (
+            "from core_lib import sign_token\n\nprint(sign_token('smoke', 'web-app'))\n"
+        ),
     },
 }
 

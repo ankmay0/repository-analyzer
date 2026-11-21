@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from langchain_core.tools import BaseTool
 
-from repo_analyzer.agent.tools import build_graph_tools, build_repository_tools
+from repo_analyzer.agent.tools import build_graph_tools, build_rag_repository_tools
 from repo_analyzer.config import Settings
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
@@ -26,7 +26,7 @@ def graph_tools(indexed_workspace: Workspace) -> dict[str, BaseTool]:
 @pytest.fixture
 def repository_tools(settings: Settings, store: VectorStore, indexed_workspace: Workspace) -> Any:
     def build(repo: str) -> dict[str, BaseTool]:
-        tools = build_repository_tools(settings, store, indexed_workspace, repo)
+        tools = build_rag_repository_tools(settings, store, indexed_workspace, repo)
         return {t.name: t for t in tools}
 
     return build
@@ -66,7 +66,7 @@ def test_analyze_impact_for_a_leaf_and_for_an_unknown_repository(
     assert unknown.startswith("Error: Unknown repository 'nope'")
 
 
-# --- expert tools: one repository's code --------------------------------------
+# --- expert tools in rag mode: one repository's code --------------------------------------
 
 
 def test_repository_tools_do_not_take_a_repository_argument(repository_tools: Any) -> None:
@@ -156,7 +156,9 @@ def test_read_file_refuses_a_symlink_that_escapes_the_repository(
 def test_tools_for_a_repository_that_is_no_longer_indexed_report_an_error(
     settings: Settings, store: VectorStore, indexed_workspace: Workspace
 ) -> None:
-    tools = {t.name: t for t in build_repository_tools(settings, store, indexed_workspace, "gone")}
+    tools = {
+        t.name: t for t in build_rag_repository_tools(settings, store, indexed_workspace, "gone")
+    }
 
     for name, args in [
         ("search_code", {"query": "x"}),

@@ -37,11 +37,23 @@ class Settings(BaseSettings):
     max_repositories: int = Field(default=10, ge=1)
     max_file_bytes: int = Field(default=200_000, ge=1)
 
-    # --- Chunking -------------------------------------------------------------
+    # --- Knowledge ------------------------------------------------------------
+    knowledge_mode: Literal["json", "rag"] = Field(
+        default="json",
+        description=(
+            "How agents learn about code. 'json': static pack, map and graph files, no "
+            "embeddings. 'rag': chunks in a vector store, searched by meaning."
+        ),
+    )
+    map_max_chars: int = Field(
+        default=60_000, ge=2_000, description="Largest repository map handed to a model at once."
+    )
+
+    # --- Chunking (rag mode) -------------------------------------------------------------
     chunk_max_lines: int = Field(default=80, ge=5)
     chunk_overlap_lines: int = Field(default=10, ge=0)
 
-    # --- Retrieval ------------------------------------------------------------
+    # --- Retrieval (rag mode) ------------------------------------------------------------
     embedding_provider: Literal["fastembed", "hashing"] = "fastembed"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     retrieval_top_k: int = Field(default=8, ge=1, le=50)
@@ -80,6 +92,10 @@ class Settings(BaseSettings):
     @property
     def index_dir(self) -> Path:
         return self.data_dir / "index"
+
+    @property
+    def knowledge_dir(self) -> Path:
+        return self.data_dir / "knowledge"
 
     @property
     def workspace_file(self) -> Path:
