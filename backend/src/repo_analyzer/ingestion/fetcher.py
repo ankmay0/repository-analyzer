@@ -12,8 +12,12 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from repo_analyzer.domain import RepoSnapshot
@@ -108,7 +112,13 @@ class RepoFetcher:
         # removes any chance of indexing a half-updated working tree.
         self._repos_dir.mkdir(parents=True, exist_ok=True)
         if dest.exists():
-            shutil.rmtree(dest)
+            try:
+                remove_tree(dest)
+            except OSError as exc:
+                raise RepositoryFetchError(
+                    f"Could not replace the previous checkout at {dest}: {exc}. Close any "
+                    "program using that folder, or delete it, and index again."
+                ) from exc
         command = [
             "git",
             "clone",
@@ -132,16 +142,39 @@ class RepoFetcher:
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            shutil.rmtree(dest, ignore_errors=True)
+            remove_tree(dest, ignore_errors=True)
             raise RepositoryFetchError(
                 f"Cloning {url} timed out after {self._clone_timeout}s"
             ) from exc
         except subprocess.CalledProcessError as exc:
-            shutil.rmtree(dest, ignore_errors=True)
+            remove_tree(dest, ignore_errors=True)
             detail = (exc.stderr or "").strip().splitlines()[-1:] or ["unknown git error"]
             raise RepositoryFetchError(f"Cloning {url} failed: {detail[0]}") from exc
         except FileNotFoundError as exc:
             raise RepositoryFetchError("git is not installed on the server") from exc
+
+
+def _make_writable_and_retry(function: Callable[..., Any], path: str, _exc: object) -> None:
+    """``rmtree`` error handler: clear the read-only flag, then retry the operation."""
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
+
+
+def remove_tree(path: Path, *, ignore_errors: bool = False) -> None:
+    """Delete a directory tree, including read-only files.
+
+    Git marks the files under ``.git/objects`` read-only. On Windows a read-only
+    file cannot be deleted, so a plain ``shutil.rmtree`` of a checkout fails
+    there with "Access is denied".
+    """
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_make_writable_and_retry)
+        else:
+            shutil.rmtree(path, onerror=_make_writable_and_retry)
+    except OSError:
+        if not ignore_errors:
+            raise
 
 
 def _head_commit(root: Path) -> str | None:

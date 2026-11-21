@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
 from repo_analyzer.errors import InvalidRepositorySourceError
-from repo_analyzer.ingestion.fetcher import RepoFetcher, parse_remote_url
+from repo_analyzer.ingestion.fetcher import RepoFetcher, parse_remote_url, remove_tree
 
 HOSTS = ("github.com",)
 
@@ -61,3 +63,32 @@ def test_local_path_is_used_in_place(tmp_path: Path) -> None:
     assert snapshot.name == "my-repo"
     assert snapshot.root == source.resolve()
     assert snapshot.commit is None  # not a git checkout
+
+
+def test_remove_tree_deletes_read_only_files_as_found_in_git_checkouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pack = tmp_path / "repo" / ".git" / "objects" / "pack" / "pack-1.idx"
+    pack.parent.mkdir(parents=True)
+    pack.write_text("data")
+    pack.chmod(stat.S_IREAD)
+
+    # Reproduce Windows, where deleting a read-only file is refused.
+    real_unlink = os.unlink
+
+    def windows_like_unlink(path: str, *args: object, **kwargs: object) -> None:
+        if not os.stat(path, **kwargs).st_mode & stat.S_IWRITE:  # type: ignore[arg-type]
+            raise PermissionError(5, "Access is denied", str(path))
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", windows_like_unlink)
+
+    remove_tree(tmp_path / "repo")
+
+    assert not (tmp_path / "repo").exists()
+
+
+def test_remove_tree_can_ignore_a_missing_directory(tmp_path: Path) -> None:
+    remove_tree(tmp_path / "never-existed", ignore_errors=True)
+    with pytest.raises(FileNotFoundError):
+        remove_tree(tmp_path / "never-existed")
