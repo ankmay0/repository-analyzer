@@ -74,8 +74,25 @@ def write_tree(root: Path, files: dict[str, str]) -> Path:
     for relative, content in files.items():
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        # newline="" writes the content's own "\n" verbatim; without it Windows
+        # translates "\n" to "\r\n", which changes byte counts the tests assert on.
+        target.write_text(content, encoding="utf-8", newline="")
     return root
+
+
+def symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    """Create a symlink, or skip the test if the OS forbids it.
+
+    Windows refuses symlink creation without Developer Mode or elevation
+    (WinError 1314). The behaviour under test — that symlinks are never
+    followed out of a checkout — is worth asserting where it can be set up.
+    """
+    import pytest
+
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink on this platform: {exc}")
 
 
 Responder = Callable[[list[BaseMessage]], AIMessage]

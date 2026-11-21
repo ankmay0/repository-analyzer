@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from repo_analyzer.ingestion.scanner import scan_repository
-from support import write_tree
+from support import symlink_or_skip, write_tree
 
 
 def scan(root: Path, max_file_bytes: int = 10_000) -> dict[str, str]:
@@ -57,7 +57,7 @@ def test_does_not_follow_symlinks_out_of_the_repository(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "ok.py").write_text("x = 1\n")
-    (repo / "link.py").symlink_to(outside / "secret.py")
-    (repo / "linked_dir").symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(repo / "link.py", outside / "secret.py")
+    symlink_or_skip(repo / "linked_dir", outside, target_is_directory=True)
 
     assert scan(repo) == {"ok.py": "python"}

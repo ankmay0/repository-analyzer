@@ -10,6 +10,7 @@ from repo_analyzer.agent.tools import build_graph_tools, build_rag_repository_to
 from repo_analyzer.config import Settings
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
+from support import symlink_or_skip
 
 
 def call(tool: BaseTool, **args: Any) -> tuple[str, list[dict[str, Any]]]:
@@ -146,7 +147,7 @@ def test_read_file_refuses_a_symlink_that_escapes_the_repository(
 ) -> None:
     outside = tmp_path / "outside.py"
     outside.write_text("password = 'hunter2'\n")
-    (fixture_repos["core-lib"] / "link.py").symlink_to(outside)
+    symlink_or_skip(fixture_repos["core-lib"] / "link.py", outside)
 
     content, _ = call(repository_tools("core-lib")["read_file"], path="link.py")
 
