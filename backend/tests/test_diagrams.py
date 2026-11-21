@@ -15,12 +15,13 @@ from repo_analyzer.agent.diagrams import (
     DiagramNode,
     build_diagram_tools,
     dependency_diagram,
+    requested_diagram,
 )
 from repo_analyzer.agent.service import ChatService
 from repo_analyzer.config import Settings
 from repo_analyzer.knowledge.store import KnowledgeStore
-from repo_analyzer.workspace import Workspace
-from support import ScriptedChatModel, tool_call
+from repo_analyzer.workspace import Workspace, WorkspaceState
+from support import ScriptedChatModel
 
 
 @pytest.fixture
@@ -70,22 +71,37 @@ def test_dependency_diagram_marks_the_failing_repository_and_what_it_affects(
     assert {n.id: n.status for n in untouched.nodes}["core-lib"] == "normal"
 
 
-async def test_show_dependency_graph_publishes_the_diagram_and_tells_the_model(
-    tools: dict[str, BaseTool], shown: list[dict[str, Any]]
+def test_requested_diagram_fires_only_on_a_draw_request(json_workspace: Workspace) -> None:
+    state = json_workspace.state
+
+    assert requested_diagram(state, "How do these repositories depend on each other?") is None
+    assert requested_diagram(state, "Which repository is safest to change?") is None
+
+    drawn = requested_diagram(state, "Draw how these repositories depend on each other.")
+    assert drawn is not None and drawn.title.startswith("Repository dependencies")
+    assert {n.status for n in drawn.nodes} == {"normal"}
+
+    for phrasing in ["visualise the dependencies", "show me a diagram", "map out the repos"]:
+        assert requested_diagram(state, phrasing) is not None, phrasing
+
+
+def test_requested_diagram_highlights_impact_only_with_a_failure_cue(
+    json_workspace: Workspace,
 ) -> None:
-    reply = await tools["show_dependency_graph"].ainvoke({"failing_repo": "core-lib"})
+    state = json_workspace.state
 
-    assert reply.startswith("Shown to the user as an interactive diagram")
-    assert "(4 nodes, 4 arrows)" in reply
-    (event,) = shown
-    assert event["type"] == "diagram"
-    assert event["diagram"]["title"].startswith("What is affected if core-lib fails")
-    assert {"id": "core-lib", "label": "core-lib", "kind": "repository", "status": "failing"} in (
-        event["diagram"]["nodes"]
-    )
+    failing = requested_diagram(state, "Draw what breaks if core-lib goes down.")
+    assert failing is not None
+    status = {n.id: n.status for n in failing.nodes}
+    assert status["core-lib"] == "failing" and status["mid-lib"] == "affected"
 
-    error = await tools["show_dependency_graph"].ainvoke({"failing_repo": "nope"})
-    assert error.startswith("Error: Unknown repository 'nope'") and len(shown) == 1
+    # A draw request that names a repository without a failure cue stays the plain graph.
+    plain = requested_diagram(state, "Draw the graph around mid-lib.")
+    assert plain is not None and all(n.status == "normal" for n in plain.nodes)
+
+
+def test_requested_diagram_is_silent_when_nothing_is_indexed() -> None:
+    assert requested_diagram(WorkspaceState(), "draw the dependencies") is None
 
 
 async def test_show_graph_accepts_model_supplied_nodes_and_edges(
@@ -140,24 +156,34 @@ async def test_show_graph_rejects_diagrams_that_cannot_be_drawn(
     assert shown == []  # nothing half-drawn reaches the user
 
 
-async def test_a_diagram_requested_by_the_hub_reaches_the_client_as_an_event(
+async def test_a_draw_request_emits_the_dependency_diagram_before_the_answer(
     json_settings: Settings, json_workspace: Workspace, knowledge: KnowledgeStore
 ) -> None:
-    hub = ScriptedChatModel(
-        responses=[
-            tool_call("show_dependency_graph", {"failing_repo": "core-lib"}),
-            AIMessage(content="Three repositories are affected; see the diagram."),
-        ]
-    )
+    # The model only answers in words; the diagram comes from the data, not a tool call.
+    hub = ScriptedChatModel(responses=[AIMessage(content="core-lib's dependents are affected.")])
     service = ChatService(
         lambda role: hub, json_settings, json_workspace, knowledge, None, prompt_caching=False
     )
 
     events = [event async for event in service.stream("t1", "Draw what breaks if core-lib fails")]
 
-    assert [e.type for e in events] == ["tool_call", "diagram", "token", "token", "done"]
-    diagram = events[1].data
+    assert [e.type for e in events] == ["diagram", "token", "token", "done"]
+    diagram = events[0].data
     assert diagram["title"].startswith("What is affected if core-lib fails")
-    assert len(diagram["nodes"]) == 4 and len(diagram["edges"]) == 4
-    # The model is told the diagram was shown, not handed its contents to repeat.
-    assert "Shown to the user as an interactive diagram" in str(hub.calls[-1][-1].content)
+    assert {n["id"]: n["status"] for n in diagram["nodes"]}["core-lib"] == "failing"
+    assert len(diagram["edges"]) == 4
+    # No tool was needed, and the model was never asked to draw.
+    assert all(not m.tool_calls for call in hub.calls for m in call if isinstance(m, AIMessage))
+
+
+async def test_an_ordinary_question_emits_no_diagram(
+    json_settings: Settings, json_workspace: Workspace, knowledge: KnowledgeStore
+) -> None:
+    hub = ScriptedChatModel(responses=[AIMessage(content="mid-lib and web-app depend on it.")])
+    service = ChatService(
+        lambda role: hub, json_settings, json_workspace, knowledge, None, prompt_caching=False
+    )
+
+    events = [event async for event in service.stream("t1", "What is affected if core-lib fails?")]
+
+    assert not [e for e in events if e.type == "diagram"]

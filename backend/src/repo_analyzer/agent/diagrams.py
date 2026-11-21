@@ -15,6 +15,7 @@ Two tools are offered:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -22,7 +23,6 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel, Field
 
-from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.workspace import Workspace, WorkspaceState
 
 DIAGRAM_EVENT = "diagram"
@@ -115,11 +115,47 @@ def dependency_diagram(state: WorkspaceState, failing: str | None = None) -> Dia
     )
 
 
-def build_diagram_tools(workspace: Workspace, emit: Emit | None = None) -> list[BaseTool]:
-    """Tools that show a diagram to the user.
+# The dependency diagram is drawn deterministically, not by the model (see
+# requested_diagram): the model reliably prefers inline ASCII when asked to draw,
+# so the one picture the data defines exactly is produced from the data instead.
+_DRAW_INTENT = re.compile(
+    r"\b(draw|diagram|graph|chart|plot|sketch|visuali[sz]e|visual|picture|map out|lay out)\b",
+    re.IGNORECASE,
+)
+_FAILURE_CUE = re.compile(
+    r"\b(break\w*|fail\w*|broke\w*|down|removed?|deleted?|unavailable|outage|goes? away)\b",
+    re.IGNORECASE,
+)
 
-    ``emit`` receives each diagram; by default it is the response stream of the
-    graph the tool is running in.
+
+def requested_diagram(state: WorkspaceState, message: str) -> Diagram | None:
+    """The dependency diagram to show for ``message``, or None if it asks for no picture.
+
+    Fires when the message asks to draw, visualise or map something and at least one
+    repository is indexed. If the message names an indexed repository together with a
+    failure cue ("if X breaks"), the diagram highlights X and what it affects; otherwise
+    it is the plain dependency graph.
+    """
+    if not _DRAW_INTENT.search(message) or not state.repositories:
+        return None
+    failing: str | None = None
+    if _FAILURE_CUE.search(message):
+        # Longest name first so "mid-lib" wins over a bare "lib"; hyphens are part of
+        # the name, so a plain \b boundary would split it.
+        for name in sorted((r.name for r in state.repositories), key=len, reverse=True):
+            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", message, re.IGNORECASE):
+                failing = name
+                break
+    diagram = dependency_diagram(state, failing)
+    return diagram if diagram.nodes else None
+
+
+def build_diagram_tools(workspace: Workspace, emit: Emit | None = None) -> list[BaseTool]:
+    """The model's diagram tool: show_graph, for pictures other than the dependency graph.
+
+    The dependency graph itself is drawn by ``requested_diagram``, not here. ``emit``
+    receives each diagram; by default it is the response stream of the graph the tool is
+    running in.
     """
 
     def publish(diagram: Diagram) -> str:
@@ -129,25 +165,6 @@ def build_diagram_tools(workspace: Workspace, emit: Emit | None = None) -> list[
             f"({len(diagram.nodes)} nodes, {len(diagram.edges)} arrows). "
             "Do not redraw it in text; refer to it and explain what it shows."
         )
-
-    @tool
-    async def show_dependency_graph(failing_repo: str | None = None) -> str:
-        """Show the user a diagram of how the indexed repositories depend on each other.
-
-        The diagram is built from package manifests, so it is exact. Arrows point from a
-        repository to one it depends on.
-
-        Args:
-            failing_repo: If given, highlight this repository as failing and mark every
-                repository that would be affected, as analyze_impact reports them.
-        """
-        try:
-            diagram = dependency_diagram(workspace.state, failing_repo)
-        except AnalyzerError as exc:
-            return f"Error: {exc}"
-        if not diagram.nodes:
-            return "No repositories are indexed yet."
-        return publish(diagram)
 
     @tool
     async def show_graph(title: str, nodes: list[DiagramNode], edges: list[DiagramEdge]) -> str:
@@ -168,4 +185,4 @@ def build_diagram_tools(workspace: Workspace, emit: Emit | None = None) -> list[
             return f"Error: {problem}."
         return publish(diagram)
 
-    return [show_dependency_graph, show_graph]
+    return [show_graph]

@@ -19,7 +19,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
-from repo_analyzer.agent.diagrams import DIAGRAM_EVENT, build_diagram_tools
+from repo_analyzer.agent.diagrams import DIAGRAM_EVENT, build_diagram_tools, requested_diagram
 from repo_analyzer.agent.experts import RepositoryExperts
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, AgentGraph
 from repo_analyzer.agent.hub import EXPERT_STEP_EVENT, build_hub_graph
@@ -116,6 +116,11 @@ class ChatService:
                 "recursion_limit": self._settings.agent_recursion_limit,
             }
             await self._close_interrupted_turn(self._graph, config)
+            # Draw the dependency/impact graph from the data when the user asks to see
+            # it, rather than relying on the model to call a tool for it.
+            requested = requested_diagram(self._workspace.state, message)
+            if requested is not None:
+                yield ChatEvent("diagram", requested.model_dump())
             async for part in self._graph.astream(
                 {"messages": [HumanMessage(message)]},
                 config,
