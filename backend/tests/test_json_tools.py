@@ -1,4 +1,4 @@
-"""Agent tools in json mode: they read the pack, map and graph, never a vector store."""
+"""Agent tools in json mode: they read the workspace graph, never a vector store."""
 
 from __future__ import annotations
 
@@ -61,28 +61,25 @@ def test_find_usages_can_be_narrowed_to_one_symbol(find_usages: BaseTool) -> Non
     assert unknown.startswith("Error: Unknown repository 'nope'")
 
 
-# --- expert: one repository -----------------------------------------------------
+# --- expert: one repository, from the graph only --------------------------------
 
 
-def test_expert_tools_take_no_repository_argument(expert_tools: Any) -> None:
+def test_expert_tools_are_graph_backed_and_take_no_repository_argument(expert_tools: Any) -> None:
     tools = expert_tools("core-lib")
 
-    assert set(tools) == {"repo_map", "find_symbol", "find_references", "read_file"}
+    assert set(tools) == {"repo_map", "find_symbol", "list_dependencies"}
     assert all("repo" not in tool.args for tool in tools.values())
 
 
-def test_repo_map_shows_files_with_signatures_and_descriptions(expert_tools: Any) -> None:
+def test_repo_map_lists_files_and_their_top_level_definitions(expert_tools: Any) -> None:
     content, _ = call(expert_tools("core-lib")["repo_map"])
 
-    assert content.startswith("core-lib: 3 files\n")
-    assert "src/core_lib/tokens.py  (10 lines)" in content
-    assert (
-        "  def sign_token(payload: str, secret: str) -> str  :1"
-        "  — Sign a payload and return the token."
-    ) in content
-    assert "  class TokenError(Exception)  :6  — Raised when a token cannot be verified." in content
-    assert "    def describe(self) -> str  :9" in content
-    assert "pyproject.toml" in content and ".env" not in content
+    assert content.startswith("core-lib: 3 files\n")  # tokens.py, __init__.py, pyproject.toml
+    assert "src/core_lib/tokens.py  (2 definitions)" in content
+    assert "  function sign_token  :1" in content
+    assert "  class TokenError  :6" in content
+    assert "    def describe" not in content  # methods are not in the graph
+    assert "pyproject.toml  (0 definitions)" in content and ".env" not in content
 
     narrowed, _ = call(expert_tools("core-lib")["repo_map"], path_prefix="src/core_lib/tok")
     assert narrowed.startswith("core-lib: 1 files under src/core_lib/tok")
@@ -93,51 +90,54 @@ def test_repo_map_shows_files_with_signatures_and_descriptions(expert_tools: Any
 def test_find_symbol_gives_the_definition_and_who_imports_it(expert_tools: Any) -> None:
     content, sources = call(expert_tools("core-lib")["find_symbol"], name="SIGN_TOKEN")
 
-    assert (
-        "core-lib/src/core_lib/tokens.py:1-3  def sign_token(payload: str, secret: str) -> str"
-        in content
-    )
+    assert "function sign_token — core-lib/src/core_lib/tokens.py:1" in content
     assert "imported in this repository by: core-lib/src/core_lib/__init__.py:1" in content
     assert "mid-lib" not in content  # other repositories' usages are the hub's business
     assert sources == [
-        {"repo": "core-lib", "path": "src/core_lib/tokens.py", "start_line": 1, "end_line": 3}
+        {"repo": "core-lib", "path": "src/core_lib/tokens.py", "start_line": 1, "end_line": 1}
     ]
 
     partial, _ = call(expert_tools("core-lib")["find_symbol"], name="token")
-    assert "sign_token" in partial and "class TokenError" in partial
+    assert "sign_token" in partial and "TokenError" in partial
     missing, _ = call(expert_tools("core-lib")["find_symbol"], name="nothing_like_this")
     assert missing == "No definition matching 'nothing_like_this' in core-lib."
 
 
-def test_find_references_and_read_file_are_served_from_the_pack(
+def test_list_dependencies_shows_what_a_file_imports_from_indexed_code(
+    expert_tools: Any,
+) -> None:
+    content, sources = call(
+        expert_tools("mid-lib")["list_dependencies"], path="src/mid_lib/session.py"
+    )
+
+    assert content.startswith("src/mid_lib/session.py depends on:")
+    assert (
+        "mid-lib/src/mid_lib/session.py:1 uses sign_token "
+        "(defined at core-lib/src/core_lib/tokens.py:1)"
+    ) in content
+    assert {s["repo"] for s in sources} == {"core-lib"}  # points at the definition
+
+    # A file that imports only the standard library has no tracked dependencies.
+    none, _ = call(expert_tools("core-lib")["list_dependencies"], path="src/core_lib/tokens.py")
+    assert "imports nothing from indexed code" in none
+
+    missing, src = call(expert_tools("core-lib")["list_dependencies"], path="does/not/exist.py")
+    assert missing.startswith("Error: no such file") and src == []
+
+
+def test_graph_backed_tools_need_no_checkout(
     expert_tools: Any, fixture_repos: dict[str, Any]
 ) -> None:
-    # Remove the checkout: json mode must not need it once the pack is written.
+    # Delete the clone: json mode works entirely from graph.json once indexed.
     for path in sorted(fixture_repos["mid-lib"].rglob("*"), reverse=True):
         path.unlink() if path.is_file() else path.rmdir()
     tools = expert_tools("mid-lib")
 
-    found, sources = call(tools["find_references"], text="sign_token")
-    read, read_sources = call(
-        tools["read_file"], path="src/mid_lib/session.py", start_line=4, end_line=5
-    )
+    mapped, _ = call(tools["repo_map"])
+    found, sources = call(tools["find_symbol"], name="create_session")
 
-    assert "mid-lib/src/mid_lib/session.py:1: from core_lib.tokens import sign_token" in found
-    assert {s["repo"] for s in sources} == {"mid-lib"}
-    assert read.splitlines()[0] == "mid-lib/src/mid_lib/session.py lines 4-5 of 6"
-    assert "    4  def create_session(user: str) -> str:" in read
-    assert read_sources == [
-        {"repo": "mid-lib", "path": "src/mid_lib/session.py", "start_line": 4, "end_line": 5}
+    assert "src/mid_lib/session.py" in mapped
+    assert "function create_session — mid-lib/src/mid_lib/session.py:4" in found
+    assert sources == [
+        {"repo": "mid-lib", "path": "src/mid_lib/session.py", "start_line": 4, "end_line": 4}
     ]
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["../mid-lib/pyproject.toml", "/etc/passwd", ".env", "src", "missing.py", "../../etc/passwd"],
-)
-def test_read_file_only_serves_files_that_are_in_the_pack(expert_tools: Any, path: str) -> None:
-    content, sources = call(expert_tools("core-lib")["read_file"], path=path)
-
-    assert content.startswith("Error: no such file")
-    assert "do-not-index" not in content and "root:" not in content
-    assert sources == []

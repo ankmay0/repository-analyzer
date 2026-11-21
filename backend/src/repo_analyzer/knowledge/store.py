@@ -1,10 +1,7 @@
-"""Read and write the JSON knowledge artifacts on disk.
+"""Read and write the JSON knowledge artifact on disk.
 
-Layout under the knowledge directory::
-
-    graph.json           the workspace graph
-    <repo>/pack.json     the packed repository
-    <repo>/map.json      the repository map
+The knowledge directory holds exactly one file, ``graph.json``: the workspace
+graph of repositories, files and symbols and how they connect.
 """
 
 from __future__ import annotations
@@ -13,13 +10,13 @@ import json
 import os
 import shutil
 import threading
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from repo_analyzer.errors import ReindexRequiredError
 
 Document = dict[str, Any]
+_GRAPH_FILE = "graph.json"
 
 
 class KnowledgeStore:
@@ -35,32 +32,30 @@ class KnowledgeStore:
 
     # -- writing ---------------------------------------------------------------
 
-    def save_repository(self, repo: str, pack: Document, repo_map: Document) -> None:
-        self._write(self._directory / repo / "pack.json", pack)
-        self._write(self._directory / repo / "map.json", repo_map)
-
     def save_graph(self, graph: Document) -> None:
-        self._write(self._directory / "graph.json", graph)
+        self._write(self._directory / _GRAPH_FILE, graph)
 
-    def prune(self, keep: Iterable[str]) -> None:
-        """Delete artifacts of repositories that are no longer in the workspace."""
-        wanted = set(keep)
+    def prune(self) -> None:
+        """Remove anything in the directory other than the graph.
+
+        A directory written by an earlier version held per-repository pack.json
+        and map.json files; this clears them on the next index so nothing stale
+        is left behind.
+        """
         if not self._directory.is_dir():
             return
         for child in self._directory.iterdir():
-            if child.is_dir() and child.name not in wanted:
+            if child.name == _GRAPH_FILE:
+                continue
+            if child.is_dir():
                 shutil.rmtree(child)
+            else:
+                child.unlink()
 
     # -- reading ---------------------------------------------------------------
 
-    def pack(self, repo: str) -> Document:
-        return self._read(self._directory / repo / "pack.json")
-
-    def map(self, repo: str) -> Document:
-        return self._read(self._directory / repo / "map.json")
-
     def graph(self) -> Document:
-        return self._read(self._directory / "graph.json")
+        return self._read(self._directory / _GRAPH_FILE)
 
     # -- internals -------------------------------------------------------------
 

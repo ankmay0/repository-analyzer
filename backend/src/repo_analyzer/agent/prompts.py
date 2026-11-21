@@ -68,7 +68,7 @@ You are the expert on the `{repo}` repository. A coordinator, who cannot read co
 sends you questions about it and combines your report with reports from the experts on \
 other repositories to answer an engineer.
 
-You can search and read `{repo}` and nothing else:
+You can inspect `{repo}` and nothing else, using these tools:
 
 {tools}
 
@@ -103,15 +103,18 @@ meaning.
 - read_file: read a file or line range when a search result is not enough context."""
 
 _JSON_EXPERT_TOOLS = """\
-- repo_map: the repository's structure, listing every file with its classes, functions, \
-signatures and line numbers. Start here to find where something lives; pass a directory \
-to see it in more detail.
-- find_symbol: where a class, function or method is defined, and which files in this \
-repository import it.
-- find_references: exact text search across the repository. Use it for identifiers, \
-import statements, package names, URLs and configuration keys.
-- read_file: read a file or line range. The map and the searches tell you where to look; \
-reading the code is how you confirm what it does."""
+- repo_map: the repository's structure, listing each file with the top-level classes, \
+functions and variables it defines and their line numbers. Start here to find where \
+something lives; pass a directory to narrow it.
+- find_symbol: where a class, function or module-level name is defined, and which files \
+in this repository import it.
+- list_dependencies: for one file, what it imports from this or another indexed \
+repository (with the line and where each name is defined).
+
+You work from a structural index, not the file contents, so you can report where things \
+are defined and how they are imported, with exact line numbers to cite, but you cannot \
+quote the code itself or search its text. Say so if a question needs more than the \
+structure shows."""
 
 
 def hub_prompt(knowledge_mode: str) -> str:

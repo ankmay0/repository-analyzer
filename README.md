@@ -3,10 +3,11 @@
 Ask questions about a small set of interdependent repositories, and find out which of
 them are affected when one fails.
 
-You give it a few repository URLs. It clones them, describes them in three JSON files (a
-packed copy of the code, a map of what each file defines, and a graph of how everything
-connects), and derives a dependency graph between them from their package manifests. Two
-things are then available:
+You give it a few repository URLs. It clones them and describes them in one JSON file: a
+graph of the repositories, their files and their symbols, and how everything connects
+(which repository depends on which, what each file defines, and what imports what). It
+also derives a repository-level dependency graph from the package manifests. Two things
+are then available:
 
 - **Impact analysis** — "if `markupsafe` breaks, what else is affected?" Answered
   deterministically from the dependency graph, without a language model.
@@ -27,7 +28,7 @@ things are then available:
 │  POST /workspace/index ──► ingestion/                                          │
 │     fetcher   validate URL, shallow git clone                                  │
 │     scanner   allow-listed text files only; no secrets, lockfiles, symlinks    │
-│     knowledge/  outline (Python ast) ──► pack.json, map.json, graph.json       │
+│     knowledge/  outline (Python ast) ──► graph.json (files, symbols, imports)  │
 │     manifests package.json / pyproject.toml / setup.cfg / requirements / go.mod│
 │          └──► dependency_graph  edges between repositories, reverse BFS        │
 │     (rag mode instead: chunker ──► retrieval/store, Chroma)                    │
@@ -51,7 +52,7 @@ things are then available:
               ┌────────────┘   │   └────────────┐        consulted in parallel
        ┌──────▼─────┐   ┌──────▼─────┐   ┌──────▼─────┐
        │ markupsafe │   │   jinja    │   │   flask    │  tools: repo_map, find_symbol,
-       │   expert   │   │   expert   │   │   expert   │         find_references, read_file
+       │   expert   │   │   expert   │   │   expert   │         list_dependencies
        └────────────┘   └────────────┘   └────────────┘  each confined to one repository
 ```
 
@@ -74,7 +75,7 @@ Backend layout (`backend/src/repo_analyzer/`):
 | `domain.py` | Immutable value types shared by every layer |
 | `config.py` | All settings, overridable by `RA_*` environment variables |
 | `ingestion/` | Fetch, scan, parse manifests, build the dependency graph, run indexing jobs |
-| `knowledge/` | File outlines, the pack, map and graph builders, their JSON store, map rendering |
+| `knowledge/` | File outlines (Python `ast`), the graph builder, and its JSON store |
 | `retrieval/` | Rag mode only: chunker's vector store and embedding backends |
 | `agent/` | The hub (`hub.py`), repository experts (`experts.py`), their shared loop, tools and prompts, and the service that streams a turn |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
@@ -82,60 +83,69 @@ Backend layout (`backend/src/repo_analyzer/`):
 
 ### Diagrams
 
-Answers can include diagrams, drawn with [React Flow](https://reactflow.dev), that can be
-panned, zoomed and rearranged. There are two sources:
+The repository dependency graph is drawn with [React Flow](https://reactflow.dev) — pan,
+zoom, rearrange — in two places:
 
-- **The repository dependency graph is drawn by the server, not the model.** When a
-  message asks to draw, visualise or map something, the chat service builds the diagram
-  from the manifests and sends it before the agent runs. If the message also names a
-  repository with a failure cue ("if markupsafe breaks"), that repository and everything
-  it affects are highlighted. It is exact. This replaced a model-called tool, because the
-  live model preferred to draw ASCII art in its answer over calling it.
-- **`show_graph` is the hub's tool for any other picture:** which files import a function,
-  how modules relate, the steps of a request. The hub is told to include only
-  relationships its tools or the experts reported, but that is not enforced, so treat such
-  a diagram as the model's summary.
+- **The Dependencies panel** always shows it, and highlights the impact when you select a
+  repository.
+- **In chat**, when you ask to draw, visualise or map the repositories or a failure's
+  impact, the backend emits the same diagram from the data (`requested_diagram`). It does
+  not depend on the model choosing to draw: the live model reliably preferred inline ASCII,
+  so the one picture the data defines exactly is produced from the data instead. Name a
+  repository with a failure cue ("if markupsafe breaks") and it highlights the impact.
 
-The backend sends a diagram as plain data (nodes, edges, a kind and a status per node) in
-a `diagram` event. The browser lays it out with dagre and renders it; no positions or
-styling come from the model. The Dependencies panel uses the same component.
+For any other picture — which files import a function, how modules relate — the hub can
+call `show_graph` with nodes and arrows it supplies. That content is the model's summary,
+not enforced, so only the dependency diagram is guaranteed exact.
+
+A diagram travels as plain data (nodes, edges, a kind and status per node) in a `diagram`
+event; the browser lays it out with dagre and renders it. No positions or styling come
+from the model.
 
 ## What gets stored
 
-Indexing writes three JSON files, all derived from one scan of each repository at its
-indexed commit. No model and no embeddings are involved, and the same commits always
-produce byte-identical files.
+Indexing writes one JSON file, `knowledge/graph.json`, derived from one scan of each
+repository at its indexed commit. No model and no embeddings are involved, and the same
+commits always produce a byte-identical file.
 
-| File | Contents | Used for |
-| --- | --- | --- |
-| `knowledge/<repo>/pack.json` | Every indexed file: path, language, size, token estimate and full text | Reading files and exact text search |
-| `knowledge/<repo>/map.json` | Per file: classes, functions, methods with signatures, line ranges and the first docstring line; third-party imports | Finding where something lives without reading the code |
-| `knowledge/graph.json` | Nodes for repositories, files and module-level symbols; edges `depends_on`, `defines`, `imports`, `uses` | "Which files in other repositories use this?" |
+| Node | Fields |
+| --- | --- |
+| repository | name, commit |
+| file | repo, path, language, module |
+| symbol | repo, path, name, kind (class/function/variable), line — module-level only |
 
-The graph is what connects repositories below the manifest level. `uses` edges are resolved
-from import statements, following re-exports to the real definition, so
-`from flask import Flask` links to the class in `flask/app.py` and not to the
-`__init__.py` that re-exports it. For the three Pallets repositories this takes about two
-seconds and yields roughly 1,500 symbols and 600 `uses` edges.
+| Edge | Meaning |
+| --- | --- |
+| `depends_on` | repository → repository, from a package manifest |
+| `defines` | file → the symbols it declares |
+| `imports` | file → an indexed file it imports |
+| `uses` | file → an indexed symbol it imports |
 
-Agents never receive these files whole. The packed repositories alone are a few hundred
-thousand tokens each, so the tools query them: the hub asks the graph where code is used,
-and each expert reads its repository's map, then pulls specific files from the pack. The
-map is rendered as an indented outline for the model and loses detail in steps (methods
-and descriptions first) when a repository is too large for the budget.
+The graph connects repositories below the manifest level. `uses` edges are resolved from
+import statements, following re-exports to the real definition, so `from flask import
+Flask` links to the class in `flask/app.py`, not the `__init__.py` that re-exports it. For
+the three Pallets repositories this takes about two seconds and yields roughly 1,500
+symbols and 600 `uses` edges in one ~1 MB file.
+
+The agents work entirely from this graph. The hub asks `find_usages` which files in other
+repositories import a repository's code; each expert, confined to one repository, uses
+`repo_map` (files and the names they define), `find_symbol` (where a name is defined and
+who imports it), and `list_dependencies` (what one file imports from indexed code). There
+is no file text in this mode, so the agents report structure and import links with exact
+line numbers to cite, but cannot quote code or search its text.
 
 Symbols and imports are extracted for **Python only**, using the standard library's `ast`
-module, which reads code without running it. Files in other languages are packed and
-listed in the map by name, and are covered by exact text search.
+module, which reads code without running it. Files in other languages appear as file nodes
+but contribute no symbols or import edges.
 
 ### The alternative: vector search
 
-Setting `RA_KNOWLEDGE_MODE=rag` switches to the earlier design, kept so the two can be
+Setting `RA_KNOWLEDGE_MODE=rag` switches to an earlier design, kept so the two can be
 compared on the same questions: files are split into line-range chunks, embedded, and
-stored in Chroma, and experts search by meaning. In that mode none of the three files is
-written, experts get `search_code` in place of `repo_map` and `find_symbol`, and the hub
-has no `find_usages`. An index built in one mode cannot be queried in the other; the
-server says so and asks for a re-index.
+stored in Chroma, and experts search by meaning and can read file contents. In that mode
+`graph.json` is not written, experts get `search_code`, `find_references` and `read_file`
+in place of the graph tools, and the hub has no `find_usages`. An index built in one mode
+cannot be queried in the other; the server says so and asks for a re-index.
 
 ## Design decisions
 
@@ -165,11 +175,12 @@ per-conversation state, and enforces step limits on both.
 out of steps comes back to the hub as a report marked incomplete, alongside the reports
 that succeeded.
 
-**Static files instead of embeddings by default.** The map and graph are exact, inspectable
-and reproducible, and cross-repository usage becomes a lookup instead of a search. The
-price is that nothing matches by meaning: an expert finds `authenticate` for a question
-about "login" by reading the map, not by similarity. That works while a repository's map
-fits in a prompt and gets weaker as repositories grow.
+**A single graph instead of embeddings by default.** The graph is exact, inspectable and
+reproducible, and cross-repository usage becomes a lookup instead of a search. Two prices:
+nothing matches by meaning (an expert finds `authenticate` for a question about "login" by
+name, not by similarity), and nothing can quote code, because no file text is stored. The
+graph answers where things are defined and how they are imported; for reading or
+meaning-based search, use `RA_KNOWLEDGE_MODE=rag`.
 
 **Only what can be resolved reliably is in the graph.** Imports and definitions are exact.
 Function calls are not tracked, because without type information they cannot be resolved
@@ -183,8 +194,9 @@ weak impact. Manifests under `examples/`, `tests/` or `docs/` only ever yield de
 
 **Repository content is untrusted input.** URLs are validated against a host allow-list
 before `git` runs, with no shell and no option injection. The scanner indexes an allow-list
-of file types, skips likely credential files and never follows symlinks. `read_file`
-applies the same rules and cannot leave the checkout. The system prompt tells the model to
+of file types, skips likely credential files and never follows symlinks, so a secret such
+as `.env` never reaches the graph. In the default mode the agents read only `graph.json`,
+never the checkout. The system prompt tells the model to
 treat retrieved content as data, which reduces but does not eliminate prompt injection
 from a hostile repository.
 
@@ -226,11 +238,11 @@ Set in the environment or in `backend/.env`. The full list is in
 | `ANTHROPIC_API_KEY` | — | Required for chat. Indexing and impact analysis work without it. |
 | `RA_LLM_MODEL` | `claude-opus-5-5` | Claude model used by the hub |
 | `RA_LLM_EFFORT` | `medium` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` |
-| `RA_EXPERT_MODEL` | same as hub | Model for repository experts, which do most of the reading |
+| `RA_EXPERT_MODEL` | same as hub | Model for repository experts |
 | `RA_EXPERT_EFFORT` | same as hub | Reasoning effort for repository experts |
 | `RA_MAX_PARALLEL_EXPERTS` | `4` | How many experts may work at the same time |
-| `RA_KNOWLEDGE_MODE` | `json` | `json` (pack, map and graph files) or `rag` (vector search) |
-| `RA_MAP_MAX_CHARS` | `60000` | Largest repository map handed to a model at once |
+| `RA_KNOWLEDGE_MODE` | `json` | `json` (one graph file) or `rag` (vector search, reads code) |
+| `RA_MAP_MAX_CHARS` | `60000` | Largest `repo_map` listing handed to a model at once |
 | `RA_EMBEDDING_PROVIDER` | `fastembed` | Rag mode: `fastembed` (local semantic model) or `hashing` (lexical, offline) |
 | `RA_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Rag mode: any text model supported by fastembed |
 | `RA_DATA_DIR` | `.data` | Clones, knowledge files, vector index and workspace state |
@@ -267,12 +279,14 @@ without calling Anthropic.
 
 ## Limitations
 
-- **Declared dependencies only.** Coupling that never appears in a manifest (HTTP calls
-  between services, shared databases, message queues) is not in the graph. The agent can
-  look for evidence with the search tools, but nothing detects it systematically.
-- **Repository-level granularity.** The graph says that flask depends on markupsafe, not
-  which flask modules do. That second level is answered per question by the flask expert,
-  not precomputed.
+- **Declared dependencies and static imports only.** Coupling that never appears in a
+  manifest or an import statement (HTTP calls, shared databases, message queues, dynamic
+  imports) is not in the graph, and nothing detects it systematically.
+- **No code reading in the default mode.** The graph stores structure, not file contents,
+  so the agents cite `file:line` but cannot quote the code, show signatures, or search its
+  text. Switch to `RA_KNOWLEDGE_MODE=rag` for that.
+- **Module-level symbols only.** The graph lists classes, functions and module-level
+  variables, not methods or nested definitions.
 - **Experts cannot see across repositories.** A finding that needs code from two
   repositories side by side depends on the hub asking each expert the right question and
   joining the reports. The hub and experts also share no memory between questions beyond
@@ -280,10 +294,10 @@ without calling Anthropic.
 - **Cost.** A cross-repository question typically costs several times the tokens of a
   single-agent design. `RA_EXPERT_MODEL` and `RA_EXPERT_EFFORT` are the levers; a cheaper
   expert model has not been evaluated for answer quality here.
-- **Python-only structure.** Symbols and import links exist only for Python files. Dynamic
-  imports, and anything reached by calling instead of importing, are not in the graph.
-- **No search by meaning in the default mode.** Vague or conceptual questions rely on the
-  expert reading the map well. `RA_KNOWLEDGE_MODE=rag` is there to compare.
+- **Python-only structure.** Symbols and import links exist only for Python files. Files in
+  other languages appear as nodes but carry no symbols or edges.
+- **No search by meaning in the default mode.** Vague or conceptual questions rely on
+  matching names in the graph. `RA_KNOWLEDGE_MODE=rag` is there to compare.
 - **Ecosystems:** npm, PyPI and Go modules. `setup.py` is not executed, so dependencies
   declared only there are missed. Adding an ecosystem is one parser function in
   `ingestion/manifests.py`.

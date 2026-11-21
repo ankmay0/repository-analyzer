@@ -36,7 +36,6 @@ from repo_analyzer.config import Settings
 from repo_analyzer.domain import DependencyEdge
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.ingestion.scanner import language_for, scan_repository
-from repo_analyzer.knowledge.render import render_map
 from repo_analyzer.knowledge.store import KnowledgeStore
 from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace
@@ -229,11 +228,9 @@ def build_rag_repository_tools(
     return [search_code, find_references, read_file]
 
 
-# --- json mode ----------------------------------------------------------------
+# --- json mode: the graph is the only source ----------------------------------
 
-
-def _numbered(lines: list[str], first: int, last: int) -> str:
-    return "\n".join(f"{number:>5}  {lines[number - 1]}" for number in range(first, last + 1))
+MAX_MAP_CHARS_FLOOR = 2_000
 
 
 def build_usage_tool(workspace: Workspace, knowledge: KnowledgeStore) -> BaseTool:
@@ -310,42 +307,96 @@ def build_usage_tool(workspace: Workspace, knowledge: KnowledgeStore) -> BaseToo
     return find_usages
 
 
+class _RepoGraph:
+    """A read-only view of one repository's slice of the workspace graph."""
+
+    def __init__(self, knowledge: KnowledgeStore, repo: str) -> None:
+        graph = knowledge.graph()
+        self.repo = repo
+        self.nodes: dict[str, dict[str, Any]] = {n["id"]: n for n in graph["nodes"]}
+        self._edges: list[dict[str, Any]] = graph["edges"]
+
+    def files(self) -> list[dict[str, Any]]:
+        return sorted(
+            (n for n in self.nodes.values() if n["kind"] == "file" and n["repo"] == self.repo),
+            key=lambda n: n["path"],
+        )
+
+    def symbols(self) -> list[dict[str, Any]]:
+        return [n for n in self.nodes.values() if n["kind"] == "symbol" and n["repo"] == self.repo]
+
+    def defined_in(self) -> dict[str, list[dict[str, Any]]]:
+        """Map each file id to the symbol nodes it defines, ordered by line."""
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for edge in self._edges:
+            if edge["kind"] == "defines" and self.nodes[edge["source"]]["repo"] == self.repo:
+                by_file.setdefault(edge["source"], []).append(self.nodes[edge["target"]])
+        for symbols in by_file.values():
+            symbols.sort(key=lambda s: s["line"])
+        return by_file
+
+    def edges(self, kind: str) -> list[dict[str, Any]]:
+        return [e for e in self._edges if e["kind"] == kind]
+
+
 def build_json_repository_tools(
     settings: Settings, workspace: Workspace, knowledge: KnowledgeStore, repo: str
 ) -> list[BaseTool]:
-    """Expert tools for ``repo`` in json mode: its map, its pack, and the graph."""
+    """Expert tools for ``repo`` in json mode: read only this repository's graph.
 
-    def pack_files() -> dict[str, dict[str, Any]]:
-        workspace.state.repository(repo)
-        return {entry["path"]: entry for entry in knowledge.pack(repo)["files"]}
+    Everything comes from the workspace graph; there is no file content to read in
+    this mode, so the tools report structure (files, definitions) and the import
+    links between them, with the line numbers to cite.
+    """
+
+    def graph() -> _RepoGraph:
+        workspace.state.repository(repo)  # raises on an unknown repository
+        return _RepoGraph(knowledge, repo)
 
     @tool(response_format="content_and_artifact")
     def repo_map(path_prefix: str = "") -> ToolOutput:
-        """Show this repository's structure: each file with its classes and functions.
+        """Show this repository's structure: each file and the top-level names it defines.
 
-        Start here. Signatures, line numbers and one-line descriptions are listed for
-        Python files; other files are listed by name. Large repositories are shown in
-        less detail until you narrow the listing.
+        Start here to find where something lives. Lists classes, functions and
+        module-level variables with their line numbers (not their bodies or signatures,
+        which this mode does not store). A large repository is shown as files only until
+        you narrow it with a path prefix.
 
         Args:
             path_prefix: Only list files whose path starts with this, e.g. `src/flask/json`.
         """
 
         def run() -> ToolOutput:
-            workspace.state.repository(repo)
-            files = [f for f in knowledge.map(repo)["files"] if f["path"].startswith(path_prefix)]
+            view = graph()
+            files = [f for f in view.files() if f["path"].startswith(path_prefix)]
             if not files:
                 return f"No files under {path_prefix!r} in {repo}.", []
-            header = f"{repo}: {len(files)} files" + (
-                f" under {path_prefix}" if path_prefix else ""
+            defined = view.defined_in()
+            scope = f" under {path_prefix}" if path_prefix else ""
+            header = f"{repo}: {len(files)} files{scope}"
+            budget = max(settings.map_max_chars, MAX_MAP_CHARS_FLOOR)
+
+            detailed: list[str] = []
+            for file in files:
+                symbols = defined.get(file["id"], [])
+                detailed.append(f"{file['path']}  ({len(symbols)} definitions)")
+                detailed += [f"  {s['symbol_kind']} {s['name']}  :{s['line']}" for s in symbols]
+            body = "\n".join(detailed)
+            if len(body) <= budget:
+                return f"{header}\n\n{body}", []
+
+            # Too large to show every definition; fall back to a file listing.
+            files_only = "\n".join(
+                f"{f['path']}  ({len(defined.get(f['id'], []))} definitions)" for f in files
             )
-            return f"{header}\n\n{render_map(files, max_chars=settings.map_max_chars)}", []
+            note = "Too many definitions to list; showing files only. Pass path_prefix for one."
+            return f"{header}\n{note}\n\n{files_only}", []
 
         return _guarded(run)
 
     @tool(response_format="content_and_artifact")
     def find_symbol(name: str) -> ToolOutput:
-        """Find where a class, function or method is defined in this repository.
+        """Find where a class, function or module-level name is defined in this repository.
 
         Also lists the files in this repository that import it.
 
@@ -355,41 +406,35 @@ def build_json_repository_tools(
         """
 
         def run() -> ToolOutput:
-            workspace.state.repository(repo)
+            view = graph()
             wanted = name.strip().lower()
             if not wanted:
                 return "Error: name must not be empty", []
-            entries = [
-                (file["path"], symbol)
-                for file in knowledge.map(repo)["files"]
-                for symbol in file["symbols"]
-            ]
-            matches = [(p, s) for p, s in entries if s["name"].lower() == wanted]
+            symbols = view.symbols()
+            matches = [s for s in symbols if s["name"].lower() == wanted]
             if not matches:
-                matches = [(p, s) for p, s in entries if wanted in s["name"].lower()]
+                matches = [s for s in symbols if wanted in s["name"].lower()]
             if not matches:
                 return f"No definition matching {name!r} in {repo}.", []
 
-            graph = knowledge.graph()
-            nodes = {node["id"]: node for node in graph["nodes"]}
             importers: dict[str, list[str]] = {}
-            for edge in graph["edges"]:
-                if edge["kind"] == "uses" and nodes[edge["source"]]["repo"] == repo:
-                    user = nodes[edge["source"]]
+            for edge in view.edges("uses"):
+                user = view.nodes[edge["source"]]
+                if user["repo"] == repo:
                     importers.setdefault(edge["target"], []).append(
                         f"{repo}/{user['path']}:{edge['line']}"
                     )
 
+            matches.sort(key=lambda s: (s["path"], s["line"]))
             lines = [f"{len(matches)} definitions matching {name!r} in {repo}:"]
             sources: list[Source] = []
-            for path, symbol in matches[:MAX_SYMBOL_MATCHES]:
-                doc = f" — {symbol['doc']}" if symbol["doc"] else ""
+            for symbol in matches[:MAX_SYMBOL_MATCHES]:
                 lines.append(
-                    f"\n{repo}/{path}:{symbol['line']}-{symbol['end_line']}  "
-                    f"{symbol['signature']}{doc}"
+                    f"\n{symbol['symbol_kind']} {symbol['name']} "
+                    f"— {repo}/{symbol['path']}:{symbol['line']}"
                 )
-                sources.append(_source(repo, path, symbol["line"], symbol["end_line"]))
-                used_by = importers.get(f"symbol:{repo}/{path}#{symbol['qualname']}", [])
+                sources.append(_source(repo, symbol["path"], symbol["line"], symbol["line"]))
+                used_by = importers.get(symbol["id"], [])
                 if used_by:
                     shown = ", ".join(sorted(used_by)[:15])
                     more = f" and {len(used_by) - 15} more" if len(used_by) > 15 else ""
@@ -401,62 +446,50 @@ def build_json_repository_tools(
         return _guarded(run)
 
     @tool(response_format="content_and_artifact")
-    def find_references(text: str) -> ToolOutput:
-        """Find lines in this repository containing an exact, case-sensitive piece of text.
+    def list_dependencies(path: str) -> ToolOutput:
+        """List what one file in this repository imports from indexed code.
+
+        Shows the modules and named symbols the file imports that resolve to a file in
+        this or another indexed repository. Imports of the standard library or of
+        packages that are not indexed are not tracked, so they do not appear.
 
         Args:
-            text: The literal text to look for, such as `import markupsafe` or a function name.
+            path: A file path in this repository, as shown by repo_map.
         """
 
         def run() -> ToolOutput:
-            if not text.strip():
-                return "Error: text must not be empty", []
+            view = graph()
+            file_id = f"file:{repo}/{path.strip().lstrip('./')}"
+            if file_id not in view.nodes:
+                return f"Error: no such file {path!r} in {repo}; see repo_map for paths", []
+
             lines: list[str] = []
             sources: list[Source] = []
-            total = 0
-            for path, entry in pack_files().items():
-                for number, line in enumerate(entry["content"].splitlines(), start=1):
-                    if text not in line:
-                        continue
-                    total += 1
-                    if len(lines) < MAX_REFERENCE_HITS:
-                        snippet = line.strip()[:MAX_REFERENCE_LINE_CHARS]
-                        lines.append(f"{repo}/{path}:{number}: {snippet}")
-                        sources.append(_source(repo, path, number, number))
+            for edge in view.edges("uses"):
+                if edge["source"] != file_id:
+                    continue
+                target = view.nodes[edge["target"]]
+                lines.append(
+                    f"{repo}/{path}:{edge['line']} uses {target['name']} "
+                    f"(defined at {target['repo']}/{target['path']}:{target['line']})"
+                )
+                line = target["line"]
+                sources.append(_source(target["repo"], target["path"], line, line))
+            for edge in view.edges("imports"):
+                if edge["source"] != file_id:
+                    continue
+                target = view.nodes[edge["target"]]
+                lines.append(
+                    f"{repo}/{path}:{edge['line']} imports module {target['repo']}/{target['path']}"
+                )
             if not lines:
-                return f"No lines contain {text!r}.", []
-            header = f"{total} matching lines"
-            if total > len(lines):
-                header += f" (showing the first {len(lines)}; use a more specific text)"
-            return header + ":\n" + "\n".join(lines), sources
+                return (
+                    f"{repo}/{path} imports nothing from indexed code (standard-library and "
+                    "third-party imports are not tracked).",
+                    [],
+                )
+            return f"{path} depends on:\n" + "\n".join(sorted(lines)), sources
 
         return _guarded(run)
 
-    @tool(response_format="content_and_artifact")
-    def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> ToolOutput:
-        """Read part of a file from this repository, with line numbers.
-
-        Args:
-            path: File path relative to the repository root, as shown by repo_map.
-            start_line: First line to return (1-based).
-            end_line: Last line to return (inclusive). At most 400 lines are returned per call.
-        """
-
-        def run() -> ToolOutput:
-            # Served from the pack, which holds only files the scanner accepted, so
-            # there is no path to resolve and nothing outside the index to reach.
-            entry = pack_files().get(path.strip().lstrip("./"))
-            if entry is None:
-                return f"Error: no such file {path!r} in {repo}; see repo_map for paths", []
-            all_lines = entry["content"].splitlines()
-            first = max(start_line, 1)
-            last = min(end_line or len(all_lines), len(all_lines), first + MAX_READ_LINES - 1)
-            if first > len(all_lines):
-                return f"Error: {path!r} has only {len(all_lines)} lines", []
-            header = f"{repo}/{entry['path']} lines {first}-{last} of {len(all_lines)}"
-            body = _numbered(all_lines, first, last)
-            return f"{header}\n{body}", [_source(repo, entry["path"], first, last)]
-
-        return _guarded(run)
-
-    return [repo_map, find_symbol, find_references, read_file]
+    return [repo_map, find_symbol, list_dependencies]

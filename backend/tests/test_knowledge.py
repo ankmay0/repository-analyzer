@@ -1,4 +1,4 @@
-"""The JSON knowledge artifacts: file outlines, the map, the pack and the graph."""
+"""The JSON knowledge artifact: file outlines, package discovery and the graph."""
 
 from __future__ import annotations
 
@@ -12,15 +12,12 @@ from repo_analyzer.domain import (
     DependencyScope,
     Ecosystem,
     PackageRef,
-    RepoSnapshot,
     SourceFile,
 )
 from repo_analyzer.ingestion.dependency_graph import DependencyGraph
-from repo_analyzer.ingestion.scanner import scan_repository
-from repo_analyzer.knowledge.builder import build_map, build_pack, find_package_dirs
+from repo_analyzer.knowledge.builder import find_package_dirs
 from repo_analyzer.knowledge.graph import build_graph
 from repo_analyzer.knowledge.outline import FileOutline, module_name, outline_file
-from repo_analyzer.knowledge.render import render_map
 from repo_analyzer.knowledge.store import KnowledgeStore
 from repo_analyzer.workspace import Workspace
 from support import write_tree
@@ -217,70 +214,24 @@ def test_import_cycles_between_modules_terminate() -> None:
 # --- pack and map documents -----------------------------------------------------
 
 
-def test_pack_and_map_describe_the_scanned_repository(tmp_path: Path) -> None:
+def test_find_package_dirs_reads_markers_from_disk(tmp_path: Path) -> None:
     root = write_tree(
         tmp_path / "demo",
         {
-            "pkg/__init__.py": "",
-            "pkg/mod.py": "import requests\nimport os\nfrom pkg import x\n\n\ndef f():\n    pass\n",
-            "README.md": "# Demo\n",
-            ".env": "SECRET=1\n",
+            "pkg/__init__.py": "",  # an empty marker: not indexed, still a package
+            "pkg/sub/__init__.py": "",
+            "pkg/mod.py": "x = 1\n",
+            "scripts/run.py": "print('hi')\n",  # no __init__, not a package
         },
     )
-    snapshot = RepoSnapshot(name="demo", source="local", root=root, commit="c0ffee")
-    files = list(scan_repository("demo", root, max_file_bytes=10_000))
-    packages = find_package_dirs(root)
 
-    pack = build_pack(snapshot, files)
-    repo_map = build_map(snapshot, [outline_file(f, packages) for f in files])
-
-    assert packages == frozenset({"pkg"})  # found on disk although the __init__ is empty
-    assert [f["path"] for f in pack["files"]] == ["README.md", "pkg/mod.py"]  # no .env
-    assert pack["commit"] == "c0ffee"
-    assert pack["totals"] == {"files": 2, "lines": 8, "approx_tokens": 18}
-    module = next(f for f in pack["files"] if f["path"] == "pkg/mod.py")
-    assert module["content"].startswith("import requests\n") and module["lines"] == 7
-
-    mapped = next(f for f in repo_map["files"] if f["path"] == "pkg/mod.py")
-    assert mapped["module"] == "pkg.mod"
-    assert [s["signature"] for s in mapped["symbols"]] == ["def f()"]
-    assert mapped["third_party_imports"] == ["requests"]  # not os (stdlib), not pkg (itself)
+    assert find_package_dirs(root) == frozenset({"pkg", "pkg/sub"})
 
 
-def test_map_rendering_drops_detail_in_steps_to_fit_the_budget() -> None:
-    files = [
-        {
-            "path": f"pkg/m{n}.py",
-            "lines": 50,
-            "symbols": [
-                {"kind": "class", "signature": f"class C{n}", "line": 1, "doc": "A class."},
-                {"kind": "method", "signature": "def run(self)", "line": 2, "doc": ""},
-                {"kind": "function", "signature": f"def helper{n}()", "line": 5, "doc": ""},
-                {"kind": "variable", "signature": "X", "line": 9, "doc": ""},
-            ],
-        }
-        for n in range(20)
-    ]
-
-    full = render_map(files, max_chars=100_000)
-    medium = render_map(files, max_chars=len(full) - 1)
-    small = render_map(files, max_chars=len(medium) - 1)
-    tiny = render_map(files, max_chars=200)
-
-    assert "  class C0  :1  — A class." in full and "    def run(self)  :2" in full
-    assert "X" not in full.replace("pkg", "")  # variables are never listed
-    assert medium.startswith("Showing classes and functions only")
-    assert "class C19" in medium and "def run" not in medium
-    assert (
-        small.startswith("Showing files only") and "pkg/m19.py  (50 lines, 3 definitions)" in small
-    )
-    assert len(tiny) <= 200 + 60 and tiny.endswith("pass a narrower path_prefix)")
+# --- end to end: indexing writes only the graph ---------------------------------
 
 
-# --- end to end: indexing writes the three artifacts ----------------------------
-
-
-def test_indexing_in_json_mode_writes_pack_map_and_graph(
+def test_indexing_in_json_mode_writes_only_the_graph(
     json_workspace: Workspace, knowledge: KnowledgeStore, json_settings: Settings
 ) -> None:
     state = json_workspace.state
@@ -290,14 +241,9 @@ def test_indexing_in_json_mode_writes_pack_map_and_graph(
     assert not json_settings.index_dir.exists()  # no vector store was created
 
     files = sorted(
-        p.relative_to(knowledge.directory).as_posix() for p in knowledge.directory.rglob("*.json")
+        p.relative_to(knowledge.directory).as_posix() for p in knowledge.directory.iterdir()
     )
-    assert files == [
-        "core-lib/map.json", "core-lib/pack.json", "graph.json",
-        "mid-lib/map.json", "mid-lib/pack.json",
-        "tools/map.json", "tools/pack.json",
-        "web-app/map.json", "web-app/pack.json",
-    ]  # fmt: skip
+    assert files == ["graph.json"]  # the one artifact; no per-repository pack or map
 
     graph = knowledge.graph()
     assert graph["edge_kinds"] == ["depends_on", "defines", "imports", "uses"]
@@ -309,29 +255,27 @@ def test_indexing_in_json_mode_writes_pack_map_and_graph(
         ("file:web-app/app/login.py", "symbol:mid-lib/src/mid_lib/session.py#create_session"),
     }
     assert ("repo:mid-lib", "repo:core-lib") in edges_of(graph, "depends_on")
-    assert "do-not-index" not in json.dumps(knowledge.pack("core-lib"))
+    # The secret file is never scanned, so it reaches neither the files nor the graph.
+    assert "do-not-index" not in json.dumps(graph)
 
 
-def test_the_artifacts_are_a_pure_function_of_the_repositories(
+def test_the_graph_is_a_pure_function_of_the_repositories(
     json_settings: Settings, fixture_repos: dict[str, Path], tmp_path: Path
 ) -> None:
     from conftest import make_indexing
 
-    def index_into(name: str) -> dict[str, str]:
+    def index_into(name: str) -> str:
         settings = json_settings.model_copy(update={"data_dir": tmp_path / name})
         store = KnowledgeStore(settings.knowledge_dir)
         make_indexing(settings, Workspace(settings.workspace_file), store, None).run(
             [str(p) for p in fixture_repos.values()]
         )
-        return {
-            p.relative_to(store.directory).as_posix(): p.read_text()
-            for p in store.directory.rglob("*.json")
-        }
+        return (store.directory / "graph.json").read_text()
 
     assert index_into("first") == index_into("second")
 
 
-def test_reindexing_removes_artifacts_of_dropped_repositories(
+def test_reindexing_drops_a_removed_repository_and_old_per_repo_files(
     json_settings: Settings,
     json_workspace: Workspace,
     knowledge: KnowledgeStore,
@@ -339,9 +283,13 @@ def test_reindexing_removes_artifacts_of_dropped_repositories(
 ) -> None:
     from conftest import make_indexing
 
+    # A directory left by an earlier version must be cleared by prune().
+    (knowledge.directory / "mid-lib").mkdir()
+    (knowledge.directory / "mid-lib" / "pack.json").write_text("{}")
+
     make_indexing(json_settings, json_workspace, knowledge, None).run(
         [str(fixture_repos["core-lib"])]
     )
 
-    assert sorted(p.name for p in knowledge.directory.iterdir()) == ["core-lib", "graph.json"]
+    assert [p.name for p in knowledge.directory.iterdir()] == ["graph.json"]
     assert {n["repo"] for n in knowledge.graph()["nodes"] if n["kind"] == "file"} == {"core-lib"}

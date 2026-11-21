@@ -2,7 +2,7 @@
 
 What gets built depends on ``Settings.knowledge_mode``:
 
-* ``json``: the pack, map and graph files (see ``repo_analyzer.knowledge``).
+* ``json``: the workspace graph file (see ``repo_analyzer.knowledge``).
 * ``rag``: chunks embedded into the vector store.
 
 The repository-level dependency graph from package manifests is built in both.
@@ -21,14 +21,14 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from repo_analyzer.config import Settings
-from repo_analyzer.domain import Chunk, Manifest, RepoSnapshot, SourceFile
+from repo_analyzer.domain import Chunk, Manifest, SourceFile
 from repo_analyzer.errors import InvalidRepositorySourceError
 from repo_analyzer.ingestion.chunker import chunk_file
 from repo_analyzer.ingestion.dependency_graph import DependencyGraph
 from repo_analyzer.ingestion.fetcher import RepoFetcher
 from repo_analyzer.ingestion.manifests import parse_manifest
 from repo_analyzer.ingestion.scanner import scan_repository
-from repo_analyzer.knowledge.builder import build_map, build_pack, find_package_dirs
+from repo_analyzer.knowledge.builder import find_package_dirs
 from repo_analyzer.knowledge.graph import build_graph
 from repo_analyzer.knowledge.outline import FileOutline, outline_file
 from repo_analyzer.knowledge.store import KnowledgeStore
@@ -99,7 +99,8 @@ class IndexingService:
 
             if self._store is None:
                 on_progress(f"{label} Mapping {len(files)} files from {snapshot.name}")
-                outlines[snapshot.name] = self._write_knowledge(snapshot, files)
+                package_dirs = find_package_dirs(snapshot.root)
+                outlines[snapshot.name] = [outline_file(f, package_dirs) for f in files]
                 symbol_count = sum(len(o.symbols) for o in outlines[snapshot.name])
                 chunk_count = 0
             else:
@@ -125,7 +126,7 @@ class IndexingService:
         if self._store is None:
             on_progress("Linking imports across repositories")
             self._knowledge.save_graph(build_graph(outlines, commits, dependencies))
-            self._knowledge.prune(names)
+            self._knowledge.prune()
         else:
             for stale in previous.repositories:
                 if stale.name not in names:
@@ -140,16 +141,6 @@ class IndexingService:
         self._workspace.replace(state)
         on_progress(f"Indexed {len(repositories)} repositories")
         return state
-
-    def _write_knowledge(
-        self, snapshot: RepoSnapshot, files: Sequence[SourceFile]
-    ) -> list[FileOutline]:
-        package_dirs = find_package_dirs(snapshot.root)
-        outlines = [outline_file(file, package_dirs) for file in files]
-        self._knowledge.save_repository(
-            snapshot.name, build_pack(snapshot, files), build_map(snapshot, outlines)
-        )
-        return outlines
 
     def _chunk(self, files: Sequence[SourceFile]) -> list[Chunk]:
         return [
