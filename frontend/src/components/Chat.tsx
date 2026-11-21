@@ -1,7 +1,15 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 
-import { ApiError, streamChat, type Repository, type Source, type Workspace } from "../api";
+import {
+  ApiError,
+  streamChat,
+  type Diagram,
+  type Repository,
+  type Source,
+  type Workspace,
+} from "../api";
+import { GraphView } from "./GraphView";
 
 /** One research action, attributed to the agent that took it. */
 interface Step {
@@ -16,13 +24,14 @@ interface Turn {
   question: string;
   steps: Step[];
   answer: string;
+  diagrams: Diagram[];
   sources: Source[];
   error: string | null;
   pending: boolean;
 }
 
 const EXAMPLE_QUESTIONS = [
-  "How do these repositories depend on each other?",
+  "Draw how these repositories depend on each other.",
   "If markupsafe breaks, which repositories are affected and where do they use it?",
   "Where does flask configure the Jinja environment?",
 ];
@@ -115,7 +124,7 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
       setTurns((current) => current.map((turn) => (turn.id === id ? change(turn) : turn)));
     setTurns((current) => [
       ...current,
-      { id, question: text, steps: [], answer: "", sources: [], error: null, pending: true },
+      { id, question: text, steps: [], answer: "", diagrams: [], sources: [], error: null, pending: true },
     ]);
 
     const controller = new AbortController();
@@ -140,6 +149,9 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
                 { actor: `${event.repo} expert`, text: describeCall(event.name, event.args) },
               ],
             }));
+            break;
+          case "diagram":
+            update((turn) => ({ ...turn, diagrams: [...turn.diagrams, event.diagram] }));
             break;
           case "sources":
             update((turn) => ({ ...turn, sources: mergeSources(turn.sources, event.sources) }));
@@ -235,6 +247,12 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
                 <Markdown>{turn.answer}</Markdown>
               </div>
             )}
+            {turn.diagrams.map((diagram, index) => (
+              <figure key={index} className="diagram">
+                <figcaption>{diagram.title}</figcaption>
+                <GraphView diagram={diagram} direction="LR" />
+              </figure>
+            ))}
             {turn.pending && !turn.answer && <p className="muted">Working…</p>}
             {turn.error && (
               <p className="notice notice-error" role="alert">

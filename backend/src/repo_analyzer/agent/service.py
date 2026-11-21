@@ -19,6 +19,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
+from repo_analyzer.agent.diagrams import DIAGRAM_EVENT, build_diagram_tools
 from repo_analyzer.agent.experts import RepositoryExperts
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, AgentGraph
 from repo_analyzer.agent.hub import EXPERT_STEP_EVENT, build_hub_graph
@@ -35,7 +36,7 @@ from repo_analyzer.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["token", "tool_call", "expert_step", "sources", "error", "done"]
+EventType = Literal["token", "tool_call", "expert_step", "diagram", "sources", "error", "done"]
 AgentRole = Literal["hub", "expert"]
 ModelFactory = Callable[[AgentRole], BaseChatModel]
 
@@ -88,9 +89,10 @@ class ChatService:
                 self._workspace,
                 self._checkpointer,
                 knowledge_mode=self._settings.knowledge_mode,
-                extra_tools=(
-                    [build_usage_tool(self._workspace, self._knowledge)] if json_mode else []
-                ),
+                extra_tools=[
+                    *([build_usage_tool(self._workspace, self._knowledge)] if json_mode else []),
+                    *build_diagram_tools(self._workspace),
+                ],
                 prompt_caching=self._prompt_caching,
             )
 
@@ -177,12 +179,14 @@ def _to_events(kind: str, data: Any) -> list[ChatEvent]:
     """Map one stream part from the hub graph to UI events.
 
     ``messages`` carries the hub's answer text, ``updates`` its completed steps, and
-    ``custom`` the progress that experts relay while a consultation is running.
+    ``custom`` what tools publish while they run: experts' progress and diagrams.
     """
     if kind == "custom":
         if isinstance(data, dict) and data.get("type") == EXPERT_STEP_EVENT:
             step = {key: data[key] for key in ("repo", "name", "args")}
             return [ChatEvent("expert_step", step)]
+        if isinstance(data, dict) and data.get("type") == DIAGRAM_EVENT:
+            return [ChatEvent("diagram", data["diagram"])]
         return []
     if kind == "messages":
         chunk, metadata = data

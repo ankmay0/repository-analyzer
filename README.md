@@ -44,7 +44,8 @@ things are then available:
                          user question
                                │
                         ┌──────▼──────┐   tools: list_repositories, analyze_impact,
-                        │     HUB     │          find_usages, consult_repository
+                        │     HUB     │          find_usages, consult_repository,
+                        │             │          show_dependency_graph, show_graph
                         │ coordinator │   keeps the conversation; cannot read code
                         └──┬───┬───┬──┘
               ┌────────────┘   │   └────────────┐        consulted in parallel
@@ -78,6 +79,23 @@ Backend layout (`backend/src/repo_analyzer/`):
 | `agent/` | The hub (`hub.py`), repository experts (`experts.py`), their shared loop, tools and prompts, and the service that streams a turn |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
 | `workspace.py` | The current set of indexed repositories, persisted as JSON |
+
+### Diagrams
+
+When a question is about relationships, or the user asks to see or draw something, the hub
+shows a diagram next to its written answer. Diagrams are drawn with
+[React Flow](https://reactflow.dev) and can be panned, zoomed and rearranged.
+
+- `show_dependency_graph` draws the repository dependency graph from the manifests,
+  optionally highlighting a failing repository and everything it affects. It is exact.
+- `show_graph` draws nodes and arrows the hub supplies, for anything else: which files
+  import a function, how modules relate, the steps of a request. The hub is told to include
+  only relationships its tools or the experts reported, but unlike the first tool this is
+  not enforced, so treat such a diagram as the model's summary.
+
+The backend sends a diagram as plain data (nodes, edges, a kind and a status per node) in
+a `diagram` event. The browser lays it out with dagre and renders it; no positions or
+styling come from the model. The Dependencies panel uses the same component.
 
 ## What gets stored
 
@@ -228,7 +246,7 @@ an index built with a different embedder.
 | `GET /api/workspace` | Indexed repositories, dependency edges, indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/workspace/impact/{repo}` | Transitive dependents of `repo` with dependency chains |
-| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call` (hub step), `expert_step`, `sources`, `error`, `done` |
+| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call` (hub step), `expert_step`, `diagram`, `sources`, `error`, `done` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
 

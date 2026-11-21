@@ -55,12 +55,38 @@ export interface Source {
   end_line: number;
 }
 
+export type DiagramNodeKind = "repository" | "file" | "symbol" | "external" | "step" | "other";
+export type DiagramNodeStatus = "normal" | "failing" | "affected" | "weak";
+
+export interface DiagramNode {
+  id: string;
+  label: string;
+  kind: DiagramNodeKind;
+  status: DiagramNodeStatus;
+}
+
+export interface DiagramEdge {
+  source: string;
+  target: string;
+  label: string;
+  dashed: boolean;
+}
+
+/** Nodes and edges without positions; the UI lays them out. */
+export interface Diagram {
+  title: string;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+}
+
 export type ChatEvent =
   | { type: "token"; text: string }
   // A step taken by the hub (the coordinating agent), including each delegation.
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   // A search or read performed by the expert on one repository.
   | { type: "expert_step"; repo: string; name: string; args: Record<string, unknown> }
+  // A diagram the hub chose to show alongside its answer.
+  | { type: "diagram"; diagram: Diagram }
   | { type: "sources"; sources: Source[] }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -151,6 +177,9 @@ export async function* streamChat(
           name: String(payload.name),
           args: (payload.args ?? {}) as Record<string, unknown>,
         };
+        break;
+      case "diagram":
+        yield { type: "diagram", diagram: payload as unknown as Diagram };
         break;
       case "sources":
         yield { type: "sources", sources: (payload.sources ?? []) as Source[] };

@@ -67,8 +67,8 @@ async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
 
     Events: ``token`` (answer text), ``tool_call`` (a step taken by the hub, including
     each delegation to a repository expert), ``expert_step`` (a search or read by an
-    expert), ``sources`` (file ranges an expert consulted), ``error``, and a final
-    ``done``.
+    expert), ``diagram`` (nodes and edges for the UI to draw), ``sources`` (file ranges
+    that were consulted), ``error``, and a final ``done``.
     """
     # Fail with a proper status code while that is still possible; once the stream
     # has started, errors can only be reported as events.
