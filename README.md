@@ -45,7 +45,7 @@ things are then available:
                                │
                         ┌──────▼──────┐   tools: list_repositories, analyze_impact,
                         │     HUB     │          find_usages, consult_repository,
-                        │             │          show_dependency_graph, show_graph
+                        │             │          show_graph
                         │ coordinator │   keeps the conversation; cannot read code
                         └──┬───┬───┬──┘
               ┌────────────┘   │   └────────────┐        consulted in parallel
@@ -82,16 +82,19 @@ Backend layout (`backend/src/repo_analyzer/`):
 
 ### Diagrams
 
-When a question is about relationships, or the user asks to see or draw something, the hub
-shows a diagram next to its written answer. Diagrams are drawn with
-[React Flow](https://reactflow.dev) and can be panned, zoomed and rearranged.
+Answers can include diagrams, drawn with [React Flow](https://reactflow.dev), that can be
+panned, zoomed and rearranged. There are two sources:
 
-- `show_dependency_graph` draws the repository dependency graph from the manifests,
-  optionally highlighting a failing repository and everything it affects. It is exact.
-- `show_graph` draws nodes and arrows the hub supplies, for anything else: which files
-  import a function, how modules relate, the steps of a request. The hub is told to include
-  only relationships its tools or the experts reported, but unlike the first tool this is
-  not enforced, so treat such a diagram as the model's summary.
+- **The repository dependency graph is drawn by the server, not the model.** When a
+  message asks to draw, visualise or map something, the chat service builds the diagram
+  from the manifests and sends it before the agent runs. If the message also names a
+  repository with a failure cue ("if markupsafe breaks"), that repository and everything
+  it affects are highlighted. It is exact. This replaced a model-called tool, because the
+  live model preferred to draw ASCII art in its answer over calling it.
+- **`show_graph` is the hub's tool for any other picture:** which files import a function,
+  how modules relate, the steps of a request. The hub is told to include only
+  relationships its tools or the experts reported, but that is not enforced, so treat such
+  a diagram as the model's summary.
 
 The backend sends a diagram as plain data (nodes, edges, a kind and a status per node) in
 a `diagram` event. The browser lays it out with dagre and renders it; no positions or

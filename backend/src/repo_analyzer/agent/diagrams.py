@@ -1,16 +1,18 @@
 """Diagrams the hub can show to the user.
 
-A diagram is plain data: nodes and edges with a little styling intent. The hub
-calls a tool, the tool publishes the diagram on the response stream, and the UI
-draws it as an interactive graph. Nothing about rendering or layout lives here.
+A diagram is plain data: nodes and edges with a little styling intent. It is
+published on the response stream and the UI draws it as an interactive graph.
+Nothing about rendering or layout lives here.
 
-Two tools are offered:
+Diagrams come from two places:
 
-* ``show_dependency_graph`` builds its diagram from the manifest-derived
-  dependency graph, so what it shows is exact.
-* ``show_graph`` draws whatever nodes and edges the model supplies, for anything
-  else worth picturing. Its content is only as reliable as the model's sources,
-  which is why the hub's prompt restricts it to relationships its tools reported.
+* ``requested_diagram`` builds the repository dependency graph from the
+  manifest-derived data whenever the user's message asks for a picture. The
+  chat service sends it without involving the model, so it is exact.
+* ``show_graph`` is a tool the hub calls with whatever nodes and edges it wants
+  drawn, for anything else worth picturing. Its content is only as reliable as
+  the model's sources, which is why the hub's prompt restricts it to
+  relationships its tools reported.
 """
 
 from __future__ import annotations
