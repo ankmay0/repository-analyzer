@@ -1,7 +1,8 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 
-import { ApiError, streamChat, type Repository, type Source, type Workspace } from "../api";
+import { ApiError, streamChat, type Repository, type Source, type Usage, type Workspace } from "../api";
+import { formatUsage } from "../usage";
 
 interface ToolStep {
   name: string;
@@ -15,6 +16,7 @@ interface Turn {
   answer: string;
   sources: Source[];
   error: string | null;
+  usage: Usage | null;
   pending: boolean;
 }
 
@@ -94,7 +96,7 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
       setTurns((current) => current.map((turn) => (turn.id === id ? change(turn) : turn)));
     setTurns((current) => [
       ...current,
-      { id, question: text, steps: [], answer: "", sources: [], error: null, pending: true },
+      { id, question: text, steps: [], answer: "", sources: [], error: null, usage: null, pending: true },
     ]);
 
     const controller = new AbortController();
@@ -113,6 +115,9 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
             break;
           case "error":
             update((turn) => ({ ...turn, error: event.message }));
+            break;
+          case "usage":
+            update((turn) => ({ ...turn, usage: event.usage }));
             break;
           case "done":
             break;
@@ -201,6 +206,12 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
             {turn.error && (
               <p className="notice notice-error" role="alert">
                 {turn.error}
+              </p>
+            )}
+
+            {turn.usage && (
+              <p className="usage" title="Summed over every model call for this answer">
+                {formatUsage(turn.usage)}
               </p>
             )}
 

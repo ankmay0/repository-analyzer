@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from repo_analyzer.agent.service import ChatEvent, ChatService
@@ -8,7 +11,7 @@ from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.workspace import Workspace
-from support import ScriptedChatModel, tool_call
+from support import ScriptedChatModel, tool_call, usage
 
 
 def make_service(
@@ -43,7 +46,7 @@ async def test_agent_calls_a_tool_then_answers_from_its_result(
 
     events = await collect(service, "t1", "What does mid-lib depend on?")
 
-    assert [e.type for e in events] == ["tool_call", "sources", "token", "token", "done"]
+    assert [e.type for e in events] == ["tool_call", "sources", "token", "token", "usage", "done"]
     assert events[0].data == {"name": "get_repository_info", "args": {"repo": "mid-lib"}}
     assert {s["repo"] for s in events[1].data["sources"]} == {"mid-lib"}
     assert "".join(e.data["text"] for e in events if e.type == "token") == (
@@ -87,8 +90,8 @@ async def test_runaway_tool_loops_stop_at_the_step_limit(
 
     events = await collect(service, "t1", "loop forever")
 
-    assert [e.type for e in events[-2:]] == ["error", "done"]
-    assert "more research steps" in events[-2].data["message"]
+    assert [e.type for e in events[-3:]] == ["error", "usage", "done"]
+    assert "more research steps" in events[-3].data["message"]
 
 
 async def test_a_turn_interrupted_before_its_tools_ran_does_not_poison_the_thread(
@@ -129,7 +132,7 @@ async def test_missing_credentials_surface_as_an_error_event(
 
     events = await collect(service, "t1", "hello")
 
-    assert [e.type for e in events] == ["error", "done"]
+    assert [e.type for e in events] == ["error", "usage", "done"]
     assert "ANTHROPIC_API_KEY" in events[0].data["message"]
 
 
@@ -146,7 +149,7 @@ async def test_agent_loads_a_skill_then_answers(
 
     events = await collect(service, "t1", "What depends on core-lib?")
 
-    assert [e.type for e in events] == ["tool_call", "token", "token", "done"]
+    assert [e.type for e in events] == ["tool_call", "token", "token", "usage", "done"]
     assert events[0].data == {"name": "load_skill", "args": {"name": "dependency-review"}}
     # load_skill has no source artifacts, so no sources event.
     assert "".join(e.data["text"] for e in events if e.type == "token") == (
@@ -162,3 +165,88 @@ async def test_agent_loads_a_skill_then_answers(
     assert isinstance(tool_result, ToolMessage)
     assert "# Dependency review" in str(tool_result.content)
     assert "cannot compute" in str(tool_result.content)
+
+
+async def test_usage_is_summed_over_every_model_call_and_reported_last(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    indexed_workspace: Workspace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = ScriptedChatModel(
+        responses=[
+            tool_call(
+                "search_code",
+                {"query": "sign_token"},
+                usage=usage(1200, 40, cache_creation=1000),
+            ),
+            tool_call(
+                "read_file",
+                {"repo": "core-lib", "path": "src/core_lib/tokens.py"},
+                call_id="call-2",
+                usage=usage(1500, 30, cache_read=1000),
+            ),
+            AIMessage(
+                content="sign_token is in core-lib.",
+                usage_metadata=usage(1700, 25, cache_read=1400),
+            ),
+        ]
+    )
+    service = make_service(model, settings, index_store, indexed_workspace)
+
+    with caplog.at_level(logging.INFO, logger="repo_analyzer.agent.service"):
+        events = await collect(service, "t-usage", "Where is sign_token?")
+
+    assert [e.type for e in events[-2:]] == ["usage", "done"]
+    summary = events[-2].data
+    latency = summary.pop("latency_ms")
+    assert summary == {
+        "input_tokens": 4400,
+        "output_tokens": 95,
+        "total_tokens": 4495,
+        "cache_read_tokens": 2400,
+        "cache_creation_tokens": 1000,
+        "llm_calls": 3,
+        "tool_calls": 2,
+    }
+    assert isinstance(latency, int) and latency >= 0
+
+    records = [r for r in caplog.records if hasattr(r, "chat_usage")]
+    assert len(records) == 1
+    assert records[0].chat_usage["thread_id"] == "t-usage"
+    assert records[0].chat_usage["total_tokens"] == 4495
+    assert "total=4495" in records[0].getMessage()
+
+
+async def test_usage_is_zero_when_the_model_reports_none(
+    settings: Settings, index_store: RepoIndexStore, indexed_workspace: Workspace
+) -> None:
+    model = ScriptedChatModel(responses=[AIMessage(content="hi")])
+    service = make_service(model, settings, index_store, indexed_workspace)
+
+    events = await collect(service, "t1", "hello")
+
+    summary = events[-2].data
+    assert events[-2].type == "usage"
+    assert summary["llm_calls"] == 1
+    assert summary["tool_calls"] == 0
+    assert summary["input_tokens"] == summary["output_tokens"] == summary["total_tokens"] == 0
+
+
+async def test_usage_is_still_reported_after_an_error(
+    settings: Settings, index_store: RepoIndexStore, indexed_workspace: Workspace
+) -> None:
+    model = ScriptedChatModel(
+        responses=[
+            tool_call("list_repositories", {}, call_id=f"c{n}", usage=usage(100, 10))
+            for n in range(20)
+        ]
+    )
+    service = make_service(model, settings, index_store, indexed_workspace, recursion_limit=4)
+
+    events = await collect(service, "t1", "loop forever")
+
+    assert [e.type for e in events[-3:]] == ["error", "usage", "done"]
+    summary = events[-2].data
+    assert summary["llm_calls"] >= 1
+    assert summary["input_tokens"] == 100 * summary["llm_calls"]

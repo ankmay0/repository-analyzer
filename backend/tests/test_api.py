@@ -104,7 +104,14 @@ async def test_chat_streams_tool_activity_sources_and_the_answer(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(response.text)
-    assert [name for name, _ in events] == ["tool_call", "sources", "token", "token", "done"]
+    assert [name for name, _ in events] == [
+        "tool_call",
+        "sources",
+        "token",
+        "token",
+        "usage",
+        "done",
+    ]
     assert events[0][1] == {"name": "search_code", "args": {"query": "sign_token"}}
     assert {s["repo"] for s in events[1][1]["sources"]} == {"core-lib", "mid-lib"}
     assert "".join(d["text"] for n, d in events if n == "token") == "It is used in mid-lib."

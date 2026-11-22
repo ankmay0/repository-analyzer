@@ -297,3 +297,10 @@ form > button {
     height: 80vh;
   }
 }
+
+.usage {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

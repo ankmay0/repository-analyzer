@@ -1,6 +1,9 @@
 /** Typed client for the backend API. Shapes mirror backend/src/repo_analyzer/api/schemas.py. */
 
 import { parseServerSentEvents } from "./sse";
+import { parseUsage, type Usage } from "./usage";
+
+export type { Usage } from "./usage";
 
 export interface Repository {
   name: string;
@@ -41,6 +44,7 @@ export type ChatEvent =
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   | { type: "sources"; sources: Source[] }
   | { type: "error"; message: string }
+  | { type: "usage"; usage: Usage }
   | { type: "done" };
 
 export class ApiError extends Error {
@@ -123,6 +127,9 @@ export async function* streamChat(
         break;
       case "error":
         yield { type: "error", message: String(payload.message ?? "Unknown error") };
+        break;
+      case "usage":
+        yield { type: "usage", usage: parseUsage(payload) };
         break;
       case "done":
         yield { type: "done" };

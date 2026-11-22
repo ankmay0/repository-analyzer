@@ -22,11 +22,12 @@ from langgraph.graph.state import CompiledStateGraph
 
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, build_agent_graph
 from repo_analyzer.agent.prompts import SYSTEM_PROMPT
+from repo_analyzer.agent.usage import UsageTracker
 from repo_analyzer.errors import AnalyzerError
 
 logger = logging.getLogger(__name__)
 
-EventType = Literal["token", "tool_call", "sources", "error", "done"]
+EventType = Literal["token", "tool_call", "sources", "error", "usage", "done"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,10 +70,12 @@ class ChatService:
     async def stream(self, thread_id: str, message: str) -> AsyncIterator[ChatEvent]:
         """Answer ``message`` in conversation ``thread_id``, yielding events as they occur.
 
-        Always ends with exactly one ``done`` event; failures are reported as an
-        ``error`` event first rather than raised, because by then the HTTP
-        response has already started.
+        Always ends with one ``usage`` event (tokens summed over every model call,
+        tool-call count and wall-clock latency) followed by exactly one ``done``
+        event; failures are reported as an ``error`` event first rather than
+        raised, because by then the HTTP response has already started.
         """
+        usage = UsageTracker()
         try:
             self.ensure_ready()
             assert self._graph is not None  # noqa: S101 - narrowed for the type checker
@@ -87,6 +90,8 @@ class ChatService:
                 stream_mode=["messages", "updates"],
                 version="v2",
             ):
+                if part["type"] == "updates":
+                    _count_usage(part["data"], usage)
                 for event in _to_events(part["type"], part["data"]):
                     yield event
         except AnalyzerError as exc:
@@ -115,6 +120,23 @@ class ChatService:
         except Exception:
             logger.exception("Chat turn failed unexpectedly")
             yield ChatEvent("error", {"message": "Unexpected server error; see server logs."})
+        usage.finish()
+        summary = usage.to_dict()
+        logger.info(
+            "chat usage thread=%s input=%d output=%d total=%d cache_read=%d cache_creation=%d "
+            "llm_calls=%d tool_calls=%d latency_ms=%d",
+            thread_id,
+            summary["input_tokens"],
+            summary["output_tokens"],
+            summary["total_tokens"],
+            summary["cache_read_tokens"],
+            summary["cache_creation_tokens"],
+            summary["llm_calls"],
+            summary["tool_calls"],
+            summary["latency_ms"],
+            extra={"chat_usage": {"thread_id": thread_id, **summary}},
+        )
+        yield ChatEvent("usage", summary)
         yield ChatEvent("done")
 
     @staticmethod
@@ -140,6 +162,16 @@ class ChatService:
             for call in messages[-1].tool_calls
         ]
         await graph.aupdate_state(config, {"messages": placeholders}, as_node=TOOLS_NODE)
+
+
+def _count_usage(data: Any, usage: UsageTracker) -> None:
+    """Add every model response in one ``updates`` stream part to ``usage``."""
+    for node, update in data.items():
+        if node != AGENT_NODE:
+            continue
+        for message in (update or {}).get("messages", []):
+            if isinstance(message, AIMessage):
+                usage.add_model_response(message)
 
 
 def _to_events(kind: str, data: Any) -> list[ChatEvent]:
