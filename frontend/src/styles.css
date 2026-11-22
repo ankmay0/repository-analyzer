@@ -255,6 +255,35 @@ form > button {
   font-size: 0.88em;
 }
 
+.mermaid-diagram {
+  margin: 0.75rem 0;
+}
+
+.mermaid-svg {
+  /* Mermaid sizes label boxes before they inherit page text styles, so reset the
+     ones that would make labels wrap or clip. */
+  overflow-wrap: normal;
+  line-height: normal;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-source summary {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
 .answer :not(pre) > code {
   padding: 0.1em 0.3em;
   background: var(--surface);

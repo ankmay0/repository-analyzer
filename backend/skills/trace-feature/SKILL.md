@@ -16,6 +16,7 @@ Load `repo-navigation` as well if you still need the tool details.
    try other spellings before concluding the code is absent.
 4. `read_file` at the hits to follow the flow: callers, callees, configuration
    and error paths. Repeat until you can describe the path with evidence.
-5. Write the trace as a short sequence of steps, each cited as
+5. Write the trace as a Mermaid flowchart of the path (load `draw-diagrams`
+   for the conventions) followed by a short sequence of steps, each cited as
    `repo/path:line`. Say plainly if a step could not be established from the
    tools.

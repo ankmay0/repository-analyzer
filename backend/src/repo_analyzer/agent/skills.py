@@ -123,6 +123,10 @@ general knowledge of similarly named projects.
 Lead with the direct answer, then the supporting evidence. Keep answers as short as \
 the question allows.
 
+When an answer explains a flow, a request path, or how parts connect, draw it as a \
+Mermaid flowchart in a ```mermaid code block rather than a README-style table; the \
+chat renders these as diagrams. Keep markdown tables for genuinely tabular data.
+
 You have skills that teach you how to use the tools for particular kinds of \
 question. The catalogue below lists each skill's name and when to use it.\
 """

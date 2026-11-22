@@ -148,6 +148,18 @@ Shipped skills live in [`backend/skills/`](backend/skills):
 | `explain-architecture` | Architecture, structure, overview, or "how does this project work" |
 | `trace-feature` | "Where is X handled", tracing a flow or feature across files |
 | `dependency-review` | Declared dependencies, hidden coupling, or "what breaks if X fails" |
+| `draw-diagrams` | Answers that explain a flow, request path or architecture: draw a Mermaid flowchart instead of a README-style table |
+
+### Diagrams in answers
+
+When an answer explains a flow or how parts connect, the agent draws it as a
+Mermaid flowchart in a ` ```mermaid ` code block (the base prompt and the
+`draw-diagrams`, `trace-feature` and `explain-architecture` skills say so). The
+chat draws these blocks with [Mermaid](https://mermaid.js.org/) once the answer
+has finished streaming. A "Diagram source" toggle shows the code, and invalid
+diagrams fall back to their source with the parse error. Mermaid is loaded
+only the first time an answer contains a diagram, and runs with
+`securityLevel: "strict"` because answers quote repository content.
 
 ### Adding a skill
 
