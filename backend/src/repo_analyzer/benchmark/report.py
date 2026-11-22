@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -18,12 +19,17 @@ CSV_COLUMNS = [
 ]  # fmt: skip
 
 
+def csv_text(results: list[QuestionResult]) -> str:
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in results:
+        writer.writerow(asdict(row))
+    return handle.getvalue()
+
+
 def write_csv(results: list[QuestionResult], path: Path) -> None:
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        for row in results:
-            writer.writerow(asdict(row))
+    path.write_text(csv_text(results), encoding="utf-8", newline="")
 
 
 def write_answers(results: list[QuestionResult], path: Path) -> None:

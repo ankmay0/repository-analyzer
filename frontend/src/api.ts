@@ -57,7 +57,7 @@ export class ApiError extends Error {
   }
 }
 
-async function toApiError(response: Response): Promise<ApiError> {
+export async function toApiError(response: Response): Promise<ApiError> {
   let detail = `Request failed (HTTP ${response.status})`;
   try {
     const body: unknown = await response.json();
@@ -74,13 +74,13 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(detail, response.status);
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) throw await toApiError(response);
   return (await response.json()) as T;
 }
 
-const JSON_HEADERS = { "Content-Type": "application/json" };
+export const JSON_HEADERS = { "Content-Type": "application/json" };
 
 export function getWorkspace(signal?: AbortSignal): Promise<Workspace> {
   return request<Workspace>("/api/workspace", { signal });

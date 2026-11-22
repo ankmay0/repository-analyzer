@@ -33,6 +33,7 @@ from repo_analyzer.workspace import IndexedRepository, Workspace
 logger = logging.getLogger(__name__)
 
 ModelFactory = Callable[[], BaseChatModel]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(slots=True)
@@ -57,6 +58,7 @@ class QuestionResult:
     latency_ms: int
     tools_used: list[str]
     error: str
+    matched_facts: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -90,6 +92,9 @@ class BenchmarkConfig:
     github_client: GitHubClient | None = None
     github_sources: dict[str, GitHubSource] | None = None
     embedder_factory: Callable[[], Embedder] | None = None
+    # Called with {"type": ..., ...} as the run advances: approach_setup, approach_started,
+    # approach_skipped, question_started and result. Used by the web UI for live progress.
+    on_progress: ProgressCallback | None = None
 
 
 class BenchmarkRunner:
@@ -101,6 +106,10 @@ class BenchmarkRunner:
         )
         self._index_store = RepoIndexStore(self._settings.repos_dir)
         self._workspace = Workspace(self._settings.workspace_file)
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self._config.on_progress is not None:
+            self._config.on_progress(event)
 
     def index_fixtures(self) -> tuple[IndexedRepository, ...]:
         """Index the fixture repositories with Ctags into the work directory."""
@@ -176,6 +185,8 @@ class BenchmarkRunner:
 
         for name in self._config.approaches:
             try:
+                if name in ("json-metadata", "json-embeddings"):
+                    self._emit({"type": "approach_setup", "approach": name})
                 if name == "json-metadata":
                     context.metadata_store = self._generate_metadata(result)
                 if name == "json-embeddings":
@@ -184,7 +195,9 @@ class BenchmarkRunner:
             except ApproachUnavailableError as exc:
                 logger.warning("Skipping %s: %s", name, exc)
                 result.skipped[name] = str(exc)
+                self._emit({"type": "approach_skipped", "approach": name, "reason": str(exc)})
                 continue
+            self._emit({"type": "approach_started", "approach": name})
 
             chat = ChatService(
                 self._model_factory,
@@ -195,6 +208,9 @@ class BenchmarkRunner:
             )
             for question in self._config.questions:
                 logger.info("[%s] %s", name, question.id)
+                self._emit(
+                    {"type": "question_started", "approach": name, "question_id": question.id}
+                )
                 row = await self._ask(chat, name, question, approach.prepare_message)
                 if self._config.judge and row.answer:
                     verdict = judge_answer(
@@ -206,6 +222,7 @@ class BenchmarkRunner:
                     )
                     row.judge_correct, row.judge_reason = verdict.correct, verdict.reason
                 result.results.append(row)
+                self._emit({"type": "result", "result": row})
 
         if self._config.judge:
             judge_usage.finish()
@@ -257,4 +274,5 @@ class BenchmarkRunner:
             latency_ms=int(usage.get("latency_ms", 0)),
             tools_used=tools,
             error="; ".join(errors),
+            matched_facts=list(grade.matched),
         )

@@ -13,6 +13,7 @@ the tests run without the model.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 from collections.abc import Iterable, Sequence
@@ -33,6 +34,11 @@ EMBED_BATCH = 64
 
 class EmbeddingsUnavailableError(AnalyzerError):
     """The optional embedding dependency is not installed."""
+
+
+def fastembed_available() -> bool:
+    """Whether the optional ``embeddings`` extra is installed."""
+    return importlib.util.find_spec("fastembed") is not None
 
 
 class Embedder(Protocol):

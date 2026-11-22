@@ -24,19 +24,15 @@ from repo_analyzer.benchmark.approaches import APPROACHES
 from repo_analyzer.benchmark.questions import load_questions
 from repo_analyzer.benchmark.report import write_report
 from repo_analyzer.benchmark.runner import BenchmarkConfig, BenchmarkRunner
-from repo_analyzer.config import Settings
+from repo_analyzer.config import Settings, default_benchmarks_dir
 from repo_analyzer.retrieval.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingsUnavailableError,
     FastEmbedEmbedder,
+    fastembed_available,
 )
 
 EXIT_NO_API_KEY = 2
-
-
-def _default_benchmarks_dir() -> Path:
-    checkout = Path(__file__).resolve().parents[4] / "benchmarks"
-    return checkout if checkout.is_dir() else Path.cwd() / "benchmarks"
 
 
 def _git_commit(path: Path) -> str | None:
@@ -50,16 +46,8 @@ def _git_commit(path: Path) -> str | None:
     return out.stdout.strip() or None
 
 
-def _fastembed_available() -> bool:
-    try:
-        import fastembed  # type: ignore[import-not-found, unused-ignore]  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    benchmarks = _default_benchmarks_dir()
+    benchmarks = default_benchmarks_dir()
     parser = argparse.ArgumentParser(
         prog="python -m repo_analyzer.benchmark",
         description="Answer the known-answer questions under each approach and grade them.",
@@ -126,7 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ANTHROPIC_API_KEY": "set" if has_key else "missing",
         "GITHUB_TOKEN": "set" if token else "missing (json-github will be skipped)",
         "fastembed": "installed"
-        if _fastembed_available()
+        if fastembed_available()
         else 'missing (json-embeddings will be skipped; pip install -e ".[embeddings]")',
         "model": settings.llm_model,
     }
@@ -158,9 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_NO_API_KEY
 
     started = datetime.now(UTC)
-    out_dir = args.out or (
-        _default_benchmarks_dir() / "results" / started.strftime("%Y%m%d-%H%M%S")
-    )
+    out_dir = args.out or (default_benchmarks_dir() / "results" / started.strftime("%Y%m%d-%H%M%S"))
 
     def embedder() -> FastEmbedEmbedder:
         return FastEmbedEmbedder(args.embedding_model)
@@ -178,7 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if token
         else None,
         github_sources=sources if token else None,
-        embedder_factory=embedder if _fastembed_available() else None,
+        embedder_factory=embedder if fastembed_available() else None,
     )
     try:
         result = asyncio.run(BenchmarkRunner(config, lambda: build_chat_model(settings)).run())

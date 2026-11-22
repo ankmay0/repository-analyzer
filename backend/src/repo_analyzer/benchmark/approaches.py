@@ -39,6 +39,14 @@ from repo_analyzer.workspace import Workspace
 
 APPROACHES = ("json-github", "json-metadata", "tools-only", "json-embeddings")
 
+# Shown in the web UI next to each approach's checkbox.
+APPROACH_SUMMARIES = {
+    "json-github": "Ctags JSON index + live read access to the repository through the GitHub API",
+    "json-metadata": "Ctags JSON index + per-endpoint metadata written once; no code access",
+    "tools-only": "No index: the model lists, searches and reads files itself",
+    "json-embeddings": "Ctags JSON index + the top-k most similar code chunks; no code access",
+}
+
 CORE_RULES = """\
 You answer questions about a small set of source code repositories for engineers.
 

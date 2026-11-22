@@ -229,6 +229,9 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
 | `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
 | `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
+| `GITHUB_TOKEN` | — | Lets the benchmark's `json-github` approach read the fixtures through the GitHub API |
+| `RA_BENCHMARKS_DIR` | `<checkout>/benchmarks` | Where the benchmark API finds `questions.yaml` and `fixtures/` |
+| `RA_BENCHMARK_GITHUB_REF` | `main` | Branch, tag or commit `json-github` reads (also `RA_BENCHMARK_GITHUB_REPO`, `RA_BENCHMARK_GITHUB_ROOT`) |
 | `RA_ENDPOINT_METADATA` | `false` | After indexing, ask the model once per repository for per-endpoint data-flow metadata and give the agent a `get_endpoint_metadata` tool |
 
 ### API
@@ -239,6 +242,12 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/skills` | Installed Agent Skills (name and description only) |
+| `GET /api/benchmark/status` | Whether a benchmark run can start, and each approach as available or unavailable (with the reason) |
+| `GET /api/benchmark/questions` | The known-answer questions, key facts and reference answers |
+| `POST /api/benchmark/runs` | `{"approaches": [...], "question_ids"?, "repositories"?, "judge"?, "github_ref"?}`: starts a run in the background (202); 503 without `ANTHROPIC_API_KEY`, 409 while another run is going |
+| `GET /api/benchmark/runs/{id}` | Run snapshot: state, progress, every answer so far, per-approach summary (poll this) |
+| `GET /api/benchmark/runs/{id}/events` | SSE progress: `plan`, `approach_setup`, `approach_started`, `approach_skipped`, `question_started`, `result`, then `finished` or `failed`. `?after=N` resumes |
+| `GET /api/benchmark/runs/{id}/results.csv` | The answers so far as CSV (same columns as the command line tool) |
 | `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `usage`, `done` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
@@ -317,3 +326,17 @@ frontmatter, the catalogue in the system prompt, and the `load_skill` tool.
   only after every repository has been fetched and scanned, so a failed run keeps the
   previous indexes, though checkouts fetched before the failure are already refreshed.
 - **Default branch only**, at the commit current when indexing ran.
+
+### Benchmark page
+
+The web UI has a **Benchmark** tab next to **Chat**. Tick the approaches to compare
+(an approach that cannot run on this server is disabled, with the reason), optionally
+pick questions, and press Run. The grid fills in live: each cell shows a Pass / Partial /
+Fail badge (all / some / none of the key facts found), tokens and latency, and clicking
+a cell shows the full answer and which key facts were found or missed. Cards and bar
+charts summarise correctness, average tokens and average latency per approach, and
+**Download CSV** gives the same file as the command line tool. The page calls the
+`/api/benchmark/*` endpoints above and reuses the same runner and grading code. Only one
+run can go at a time, because each run makes many model calls. Runs are kept in memory
+(the page resumes a run after a reload) and each finished run is also written to
+`RA_DATA_DIR/benchmark/<run id>/` like the command line tool's results.

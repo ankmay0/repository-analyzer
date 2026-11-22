@@ -23,6 +23,12 @@ def default_skills_dir() -> Path:
     return here.parents[1] / "skills"  # backend/src/repo_analyzer -> backend/skills
 
 
+def default_benchmarks_dir() -> Path:
+    """``benchmarks/`` of a source checkout (questions and fixture apps), else under the cwd."""
+    checkout = Path(__file__).resolve().parents[3] / "benchmarks"
+    return checkout if checkout.is_dir() else Path.cwd() / "benchmarks"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RA_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -73,6 +79,25 @@ class Settings(BaseSettings):
             "Costs one model call per repository per indexing run."
         ),
     )
+
+    # --- Benchmark -------------------------------------------------------------
+    benchmarks_dir: Path = Field(
+        default_factory=default_benchmarks_dir,
+        description="Directory with questions.yaml and fixtures/ for the benchmark API and CLI.",
+    )
+    github_token: SecretStr | None = Field(
+        default=None,
+        validation_alias="GITHUB_TOKEN",
+        description="Lets the json-github benchmark approach read the fixtures via the GitHub API.",
+    )
+    benchmark_github_repo: str = Field(
+        default="ankmay0/repository-analyzer",
+        description="owner/name that holds the benchmark fixtures, for json-github.",
+    )
+    benchmark_github_ref: str = Field(
+        default="main", description="Branch, tag or commit that json-github reads."
+    )
+    benchmark_github_root: str = "benchmarks/fixtures"
 
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
