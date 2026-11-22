@@ -78,3 +78,5 @@ class HealthOut(BaseModel):
     status: str
     llm_configured: bool
     llm_model: str
+    ctags_available: bool
+    ctags_version: str | None

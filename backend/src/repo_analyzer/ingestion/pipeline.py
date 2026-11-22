@@ -25,6 +25,7 @@ from repo_analyzer.ingestion.repo_index import (
     symbol_count,
 )
 from repo_analyzer.ingestion.scanner import scan_repository
+from repo_analyzer.ingestion.symbols import require_ctags
 from repo_analyzer.workspace import IndexedRepository, Workspace, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class IndexingService:
                 "Repository names must be unique within a workspace; duplicated: "
                 + ", ".join(duplicates)
             )
+        require_ctags(self._settings.ctags_path)
 
     def run(
         self, sources: Sequence[str], on_progress: ProgressCallback = lambda _: None
@@ -81,6 +83,7 @@ class IndexingService:
                     snapshot.name, snapshot.root, max_file_bytes=self._settings.max_file_bytes
                 ),
                 indexed_at=indexed_at,
+                ctags_path=self._settings.ctags_path,
             )
             repository = IndexedRepository(
                 name=snapshot.name,

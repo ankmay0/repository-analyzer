@@ -81,7 +81,7 @@
       <ul class="steps">
         <li><b>Fetcher</b> checks the URL and clones the repo</li>
         <li><b>Scanner</b> keeps safe text files only (no secrets, lockfiles or symlinks)</li>
-        <li><b>Symbols</b> lists functions, classes and imports with line numbers (Python <code>ast</code>, simple regexes for other languages)</li>
+        <li><b>Symbols</b> run Universal Ctags once per repo for functions, classes and imports (imports only as complete as Ctags makes them)</li>
         <li><b>Manifests</b> read <code>package.json</code>, <code>pyproject.toml</code>, <code>go.mod</code> and similar</li>
         <li><b>Writer</b> saves one JSON file per repo</li>
       </ul>
@@ -123,6 +123,11 @@
     </div>
     <div class="layer ext">
       <div class="tag">External</div>
+      <h2>Universal Ctags</h2>
+      <p>Extracts functions, classes and imports during indexing. Required; there is no fallback parser.</p>
+    </div>
+    <div class="layer ext">
+      <div class="tag">External</div>
       <h2>Anthropic Claude</h2>
       <p>The language model behind chat. Only chat needs the API key.</p>
     </div>
@@ -136,7 +141,7 @@
         <li>The Repositories panel sends the URLs to <code>/api/workspace/index</code></li>
         <li>Each repo is cloned, scanned, and its symbols and manifests are read</li>
         <li>One JSON file per repo is written to <code>.data/repos/</code></li>
-        <li>No AI and no model download, so it is fast and gives the same result every time</li>
+        <li>Universal Ctags is required. No AI and no model download, so it is fast and gives the same result every time</li>
       </ol>
     </div>
     <div class="flow">
@@ -151,7 +156,7 @@
   </div>
   </div>
 
-  <p class="note">Simplified design: JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
+  <p class="note">Symbols come from Universal Ctags (no ast or regex fallback). JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
 </div>
 </body>
 </html>

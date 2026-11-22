@@ -16,7 +16,8 @@ manifests (runtime, optional or dev), and the functions, classes and imports of 
 source file with line numbers. Use it to find your way around and to answer \
 questions about structure and declared dependencies. On a large repository pass \
 `path` (a directory or file) to see the symbols, which are otherwise left out. \
-Symbols for languages other than Python are found heuristically and can be incomplete.
+Functions, classes and imports come from Universal Ctags; import lists are only as \
+complete as Ctags makes them (often empty for JavaScript and TypeScript).
 - search_code: exact text or regular-expression search over the files, not semantic \
 search. Use the words the code itself would use: identifiers, import statements, \
 package names, URLs, configuration keys. If a first query finds nothing, try other \

@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     max_repositories: int = Field(default=10, ge=1)
     max_file_bytes: int = Field(default=200_000, ge=1)
 
+    # --- Symbol extraction -------------------------------------------------
+    ctags_path: str = Field(
+        default="ctags",
+        description=(
+            "Path to the Universal Ctags binary used to extract functions, "
+            "classes and imports. Indexing fails if this is missing or unusable."
+        ),
+    )
+
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     llm_model: str = "claude-opus-5-5"

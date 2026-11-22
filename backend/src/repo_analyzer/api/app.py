@@ -18,6 +18,7 @@ from repo_analyzer.api.services import build_services
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import (
     AnalyzerError,
+    CtagsError,
     IndexingInProgressError,
     InvalidRepositorySourceError,
     LLMNotConfiguredError,
@@ -33,6 +34,7 @@ _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
     WorkspaceEmptyError: 409,
     RepositoryFetchError: 502,
     LLMNotConfiguredError: 503,
+    CtagsError: 503,
 }
 
 

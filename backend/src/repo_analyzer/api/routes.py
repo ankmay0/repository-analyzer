@@ -17,6 +17,7 @@ from repo_analyzer.api.schemas import (
 )
 from repo_analyzer.api.services import Services
 from repo_analyzer.errors import WorkspaceEmptyError
+from repo_analyzer.ingestion.symbols import probe_ctags
 
 router = APIRouter()
 
@@ -31,10 +32,13 @@ ServicesDep = Annotated[Services, Depends(get_services)]
 
 @router.get("/health")
 def health(services: ServicesDep) -> HealthOut:
+    version = probe_ctags(services.settings.ctags_path)
     return HealthOut(
         status="ok",
         llm_configured=services.settings.anthropic_api_key is not None,
         llm_model=services.settings.llm_model,
+        ctags_available=version is not None,
+        ctags_version=version,
     )
 
 

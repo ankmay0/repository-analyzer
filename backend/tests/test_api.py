@@ -58,6 +58,8 @@ async def test_health(client: httpx.AsyncClient) -> None:
     assert body["status"] == "ok"
     assert "embedder" not in body
     assert body["llm_model"] == "claude-opus-5-5"
+    assert body["ctags_available"] is True
+    assert body["ctags_version"] is not None and "Universal Ctags" in body["ctags_version"]
 
 
 async def test_index_then_inspect_workspace_and_json_files(
@@ -180,3 +182,34 @@ async def test_a_failed_job_reports_its_error_and_keeps_the_previous_workspace(
 
 async def test_the_impact_endpoint_is_gone(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/workspace/impact/core-lib")).status_code == 404
+
+
+async def test_health_reports_when_ctags_is_unavailable(
+    settings: Settings, model: ScriptedChatModel
+) -> None:
+    settings.ctags_path = "/no/such/ctags"
+    app = create_app(settings, model_factory=lambda: model)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        body = (await http.get("/api/health")).json()
+
+    assert body["ctags_available"] is False
+    assert body["ctags_version"] is None
+
+
+async def test_index_without_ctags_is_a_503(
+    settings: Settings, model: ScriptedChatModel, fixture_repos: dict[str, Path]
+) -> None:
+    settings.ctags_path = "/no/such/ctags"
+    app = create_app(settings, model_factory=lambda: model)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        response = await http.post(
+            "/api/workspace/index", json={"repositories": [str(fixture_repos["core-lib"])]}
+        )
+
+        assert response.status_code == 503
+        assert "Universal Ctags is required" in response.json()["detail"]
+        assert (await http.get("/api/workspace")).json()["job"]["state"] == "idle"

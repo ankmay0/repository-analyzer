@@ -33,3 +33,7 @@ class LLMNotConfiguredError(AnalyzerError):
 
 class WorkspaceEmptyError(AnalyzerError):
     """A question was asked before any repository was indexed."""
+
+
+class CtagsError(AnalyzerError):
+    """Universal Ctags is missing, is not usable, or failed during indexing."""
