@@ -132,8 +132,9 @@ def build_tools(
         `stats` (file/line counts and languages), `manifests`, `dependencies` (each with a
         `kind` of runtime, optional or dev, and the manifest that declares it), and `files`.
         Each file has `path`, `language`, `size_bytes`, `line_count` and, for source files,
-        `symbols`: its `functions`, `classes` and `imports` with line numbers. Symbols for
-        languages other than Python are found heuristically and can miss unusual code.
+        `symbols`: its `functions`, `classes` and `imports` with line numbers, taken from
+        Universal Ctags. Import lists are only as complete as Ctags makes them, and are
+        often empty for JavaScript and TypeScript.
 
         Args:
             repo: Repository name.

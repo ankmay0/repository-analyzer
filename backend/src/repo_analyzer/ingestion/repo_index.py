@@ -40,7 +40,7 @@ from typing import Any
 from repo_analyzer.domain import Manifest, RepoSnapshot, SourceFile
 from repo_analyzer.errors import UnknownRepositoryError
 from repo_analyzer.ingestion.manifests import parse_manifest
-from repo_analyzer.ingestion.symbols import extract_symbols
+from repo_analyzer.ingestion.symbols import extract_symbols_for_repository
 
 logger = logging.getLogger(__name__)
 
@@ -57,16 +57,28 @@ def index_filename(owner: str, name: str) -> str:
 
 
 def build_repo_index(
-    snapshot: RepoSnapshot, files: Iterable[SourceFile], *, indexed_at: str
+    snapshot: RepoSnapshot,
+    files: Iterable[SourceFile],
+    *,
+    indexed_at: str,
+    ctags_path: str = "ctags",
 ) -> RepoIndex:
-    """Describe ``snapshot`` from the files the scanner accepted. Pure: no disk access."""
+    """Describe ``snapshot`` from the files the scanner accepted.
+
+    Runs Universal Ctags once over the checkout to fill in functions, classes
+    and imports. Raises ``CtagsError`` if Ctags is missing or the run fails.
+    """
+    file_list = list(files)
+    symbols_by_path = extract_symbols_for_repository(
+        snapshot.root, [file.path for file in file_list], ctags_path=ctags_path
+    )
     file_entries: list[dict[str, Any]] = []
     manifests: list[Manifest] = []
     languages: Counter[str] = Counter()
     total_lines = 0
     total_bytes = 0
 
-    for file in files:
+    for file in file_list:
         size_bytes = len(file.text.encode("utf-8"))
         line_count = len(file.text.splitlines())
         entry: dict[str, Any] = {
@@ -75,8 +87,8 @@ def build_repo_index(
             "size_bytes": size_bytes,
             "line_count": line_count,
         }
-        symbols = extract_symbols(file.language, file.text)
-        if not symbols.is_empty():
+        symbols = symbols_by_path.get(file.path)
+        if symbols is not None and not symbols.is_empty():
             entry["symbols"] = symbols.to_dict()
         file_entries.append(entry)
         languages[file.language] += 1

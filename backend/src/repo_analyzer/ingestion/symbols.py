@@ -1,28 +1,46 @@
-"""Extract functions, classes and imports (with line numbers) from source text.
+"""Extract functions, classes and imports by running Universal Ctags once per repository.
 
-Python is parsed with the standard library ``ast`` module, so it is exact. Every
-other language uses small per-line regular expressions. Those are heuristics:
-they are fast, need no parser dependencies, and are right for ordinary code, but
-they can miss unusual formatting (for example a function declared across several
-lines before its name) and can be fooled by code inside strings or comments.
-Treat the output as a map of where to look, not as a compiler's view.
+The JSON index lists only top-level functions, classes (and methods named
+``Class.method``), and the imports that Ctags itself reports. Everything else
+Ctags emits — variables, constants, properties, type aliases, enumerators, and
+symbols nested inside a function — is dropped.
 
-Everything here is a pure function of the file text.
+Imports come from Ctags reference tags (``--extras=+r``). Coverage varies by
+language: Python and a few others are reasonably complete; JavaScript and
+TypeScript currently report almost none. Where Ctags gives nothing, the import
+list is empty.
+
+This module talks to Ctags through ``subprocess`` with an argument list (no
+shell). It does not follow symlinks. If the binary is missing, is not Universal
+Ctags, or the run fails, indexing fails with ``CtagsError``.
 """
 
 from __future__ import annotations
 
-import ast
-import re
+import json
+import logging
+import subprocess
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
+
+from repo_analyzer.errors import CtagsError
+
+logger = logging.getLogger(__name__)
+
+CTAGS_TIMEOUT_SECONDS = 120.0
+CTAGS_PROBE_TIMEOUT_SECONDS = 5.0
+
+# --- Public value types (unchanged JSON shape) --------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class Symbol:
     name: str
     line: int  # 1-based
-    end_line: int | None = None  # only known when parsed with ``ast``
+    end_line: int | None = None  # only when Ctags provides ``end``
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"name": self.name, "line": self.line}
@@ -57,241 +75,409 @@ class FileSymbols:
         }
 
 
-# --- Python (ast) -------------------------------------------------------------
+# --- Kind mapping -------------------------------------------------------------
+#
+# Functions: function, func, generator, and (when not nested) method-like kinds.
+# Methods are stored in the ``functions`` list as ``Class.method``.
+#   - ``member`` is a Python method, but a field in C, C++ and Go, so it is
+#     kept only when the language is Python.
+#   - A ``func``/``function`` whose scope is a struct, class, trait, etc. is a
+#     method (Go, PHP). A ``method`` with no scope is a top-level function
+#     (Kotlin).
+#
+# Classes: class, struct, interface, trait, union, object (Kotlin), and Ruby
+# modules. Interfaces are included because they are the type you look up and
+# attach methods to; type aliases, enums, typedefs, packages and Rust
+# ``implementation`` blocks are left out.
+# Protobuf ``message`` and ``service`` are treated as classes; ``rpc`` as a
+# method of the service.
+#
+# Dropped: variable, constant, property, field, enumerator, alias, enum,
+# namespace, package (as a definition), parameter, local, and anything whose
+# scope is a function (helpers and locals nested inside one).
+
+Category = Literal["function", "class", "import"]
+
+_FUNCTION_KINDS = frozenset({"function", "func", "generator", "rpc"})
+_METHOD_KINDS = frozenset({"method", "getter", "setter", "singletonMethod", "methodSpec"})
+_CLASS_KINDS = frozenset(
+    {
+        "class",
+        "struct",
+        "interface",
+        "trait",
+        "union",
+        "message",  # protobuf
+        "service",  # protobuf
+    }
+)
+# Kotlin ``object`` declarations (JSON also uses kind "object" for maps, so this
+# is language-restricted below).
+_KOTLIN_OBJECT_KIND = "object"
+
+# Markup and data formats emit "class" tags for CSS selectors, HTML class
+# attributes, JSON objects, and so on. Those are not code symbols.
+_NON_CODE_LANGUAGES = frozenset(
+    {
+        "HTML",
+        "CSS",
+        "JSON",
+        "Markdown",
+        "YAML",
+        "XML",
+        "SVG",
+        "DTD",
+        "TOML",
+        "Ini",
+        "Iniconf",
+        "Maven2",
+        "ReStructuredText",
+        "AsciiDoc",
+        "Text",
+    }
+)
+# Ruby modules are class-like; Python/Go "module"/"package" tags are imports or
+# the file's own package declaration, never a class.
+_RUBY_MODULE_KIND = "module"
+
+_NESTED_SCOPE_KINDS = frozenset(
+    {
+        "function",
+        "func",
+        "method",
+        "member",
+        "generator",
+        "singletonMethod",
+        "getter",
+        "setter",
+        "rpc",
+    }
+)
+_PACKAGE_SCOPE_KINDS = frozenset({"package", "namespace"})
+_TYPE_SCOPE_KINDS = frozenset(
+    {
+        "class",
+        "struct",
+        "interface",
+        "trait",
+        "union",
+        "object",
+        "module",
+        "implementation",  # Rust impl: qualify methods as Type.method, but not a class
+        "message",
+        "service",
+    }
+)
+_IMPORT_ROLES = frozenset(
+    {
+        "imported",
+        "indirectlyImported",
+        "namespace",
+        "required",
+        "loaded",
+        "system",
+        "local",
+        "included",
+    }
+)
+_IMPORT_KINDS = frozenset({"module", "package", "library", "header", "script", "unknown"})
 
 
-class _PythonVisitor(ast.NodeVisitor):
-    """Collect top-level functions, classes and methods; nested helpers are skipped."""
+def _roles(tag: dict[str, Any]) -> set[str]:
+    raw = tag.get("roles")
+    if not raw or not isinstance(raw, str):
+        return set()
+    return {part for part in raw.replace(",", " ").split() if part}
 
+
+def _kind(tag: dict[str, Any]) -> str:
+    value = tag.get("kind")
+    return value if isinstance(value, str) else ""
+
+
+def _language(tag: dict[str, Any]) -> str:
+    value = tag.get("language")
+    return value if isinstance(value, str) else ""
+
+
+def _scope(tag: dict[str, Any]) -> tuple[str, str]:
+    raw_scope = tag.get("scope")
+    raw_kind = tag.get("scopeKind")
+    scope = raw_scope if isinstance(raw_scope, str) else ""
+    scope_kind = raw_kind if isinstance(raw_kind, str) else ""
+    return scope, scope_kind
+
+
+def _line(tag: dict[str, Any]) -> int | None:
+    value = tag.get("line")
+    if isinstance(value, int) and value >= 1:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) >= 1:
+        return int(value)
+    return None
+
+
+def _end_line(tag: dict[str, Any], start: int) -> int | None:
+    value = tag.get("end")
+    if isinstance(value, int) and value >= start:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) >= start:
+        return int(value)
+    return None
+
+
+def _is_nested_in_function(scope_kind: str) -> bool:
+    return scope_kind in _NESTED_SCOPE_KINDS
+
+
+def _qualified_name(name: str, scope: str, scope_kind: str) -> str:
+    """Build ``Class.method`` / ``Service.Config``. Go's ``package.Type`` becomes ``Type``."""
+    if not scope or scope_kind in _PACKAGE_SCOPE_KINDS:
+        return name
+    if scope_kind in {"struct", "interface"} and "." in scope:
+        scope = scope.rsplit(".", 1)[-1]
+    return f"{scope}.{name}"
+
+
+def classify_ctags_tag(tag: dict[str, Any]) -> tuple[Category, Symbol | ImportRef] | None:
+    """Map one Ctags JSON object to a function, class or import, or ``None`` to drop it."""
+    name = tag.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    start = _line(tag)
+    if start is None:
+        return None
+    kind = _kind(tag)
+    language = _language(tag)
+    scope, scope_kind = _scope(tag)
+    roles = _roles(tag)
+
+    if language in _NON_CODE_LANGUAGES:
+        return None
+
+    if roles & _IMPORT_ROLES and kind in _IMPORT_KINDS:
+        # Prefer the module being imported: for ``from pkg import Name`` Ctags
+        # emits both the module (kind=module, roles=namespace) and the name
+        # (kind=unknown, scope=pkg). Both become ``pkg`` and are de-duplicated.
+        module = scope if kind == "unknown" and scope else name
+        if not module:
+            return None
+        return "import", ImportRef(module, start)
+
+    if _is_nested_in_function(scope_kind):
+        return None
+
+    is_kotlin_object = kind == _KOTLIN_OBJECT_KIND and language == "Kotlin"
+    if (
+        kind in _CLASS_KINDS
+        or (kind == _RUBY_MODULE_KIND and language == "Ruby")
+        or is_kotlin_object
+    ):
+        qualified = _qualified_name(name, scope, scope_kind)
+        return "class", Symbol(qualified, start, _end_line(tag, start))
+
+    is_python_method = kind == "member" and language == "Python" and scope_kind in _TYPE_SCOPE_KINDS
+    is_method = kind in _METHOD_KINDS or is_python_method
+    is_function = kind in _FUNCTION_KINDS
+    if not (is_method or is_function):
+        return None
+
+    if (is_method or scope_kind in _TYPE_SCOPE_KINDS) and scope and scope_kind in _TYPE_SCOPE_KINDS:
+        display = _qualified_name(name, scope, scope_kind)
+    else:
+        display = name
+    return "function", Symbol(display, start, _end_line(tag, start))
+
+
+def parse_ctags_json_lines(
+    lines: Iterable[str], *, root: Path | None = None
+) -> dict[str, FileSymbols]:
+    """Parse Ctags ``--output-format=json`` lines into per-file symbol lists.
+
+    ``root``, when given, is used to make absolute paths relative to the checkout.
+    Malformed lines and pseudo-tags are ignored. This function is pure given its
+    inputs, so tests can feed it canned output without running Ctags.
+    """
+    collected: dict[str, _Bucket] = defaultdict(_Bucket)
+    for raw in lines:
+        line = raw.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            tag = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(tag, dict) or tag.get("_type") not in (None, "tag"):
+            continue
+        path = _tag_path(tag, root)
+        if path is None:
+            continue
+        mapped = classify_ctags_tag(tag)
+        if mapped is None:
+            continue
+        category, item = mapped
+        collected[path].add(category, item)
+    return {path: bucket.to_symbols() for path, bucket in collected.items()}
+
+
+class _Bucket:
     def __init__(self) -> None:
         self.functions: list[Symbol] = []
         self.classes: list[Symbol] = []
         self.imports: list[ImportRef] = []
-        self._classes: list[str] = []  # enclosing class names, so methods read ``Class.method``
-        self._function_depth = 0
+        self._seen: set[tuple[str, str, int]] = set()
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        if self._function_depth == 0:
-            self.classes.append(Symbol(".".join([*self._classes, node.name]), *_span(node)))
-        self._classes.append(node.name)
-        self.generic_visit(node)
-        self._classes.pop()
+    def add(self, category: Category, item: Symbol | ImportRef) -> None:
+        key = (
+            category,
+            item.name if isinstance(item, Symbol) else item.module,
+            item.line,
+        )
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        if category == "function" and isinstance(item, Symbol):
+            self.functions.append(item)
+        elif category == "class" and isinstance(item, Symbol):
+            self.classes.append(item)
+        elif category == "import" and isinstance(item, ImportRef):
+            self.imports.append(item)
 
-    def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        if self._function_depth == 0:
-            self.functions.append(Symbol(".".join([*self._classes, node.name]), *_span(node)))
-        self._function_depth += 1
-        self.generic_visit(node)
-        self._function_depth -= 1
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._function(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._function(node)
-
-    def visit_Import(self, node: ast.Import) -> None:
-        self.imports += [ImportRef(alias.name, node.lineno) for alias in node.names]
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        self.imports.append(ImportRef("." * node.level + (node.module or ""), node.lineno))
+    def to_symbols(self) -> FileSymbols:
+        return FileSymbols(
+            functions=tuple(sorted(self.functions, key=lambda s: (s.line, s.name))),
+            classes=tuple(sorted(self.classes, key=lambda s: (s.line, s.name))),
+            imports=tuple(sorted(self.imports, key=lambda i: (i.line, i.module))),
+        )
 
 
-def _span(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, int | None]:
-    return node.lineno, node.end_lineno
-
-
-def _extract_python(text: str) -> FileSymbols | None:
-    """Parse with ``ast``; ``None`` when the file is not valid Python 3."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, RecursionError):
+def _tag_path(tag: dict[str, Any], root: Path | None) -> str | None:
+    raw = tag.get("path")
+    if not isinstance(raw, str) or not raw:
         return None
-    visitor = _PythonVisitor()
-    visitor.visit(tree)
-    return FileSymbols(
-        functions=tuple(visitor.functions),
-        classes=tuple(visitor.classes),
-        imports=tuple(visitor.imports),
-    )
+    path = Path(raw)
+    if path.is_absolute():
+        if root is None:
+            return _normalize_repo_path(path.as_posix())
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None
+    return _normalize_repo_path(raw)
 
 
-# --- Regex heuristics ---------------------------------------------------------
+def _normalize_repo_path(path: str) -> str:
+    posix = PurePosixPath(path.replace("\\", "/"))
+    parts = [part for part in posix.parts if part not in ("/", ".")]
+    return str(PurePosixPath(*parts)) if parts else ""
 
 
-@dataclass(frozen=True, slots=True)
-class _Patterns:
-    functions: tuple[re.Pattern[str], ...] = ()
-    classes: tuple[re.Pattern[str], ...] = ()
-    imports: tuple[re.Pattern[str], ...] = ()
+# --- Running Ctags ------------------------------------------------------------
 
 
-def _rx(*patterns: str) -> tuple[re.Pattern[str], ...]:
-    return tuple(re.compile(pattern) for pattern in patterns)
+def probe_ctags(ctags_path: str, *, timeout: float = CTAGS_PROBE_TIMEOUT_SECONDS) -> str | None:
+    """Return a short version string if ``ctags_path`` is Universal Ctags with JSON.
+
+    ``None`` means the binary is missing, is not Universal Ctags, or does not
+    support ``--output-format=json``. Never raises.
+    """
+    if not ctags_path or ctags_path.startswith("-"):
+        return None
+    try:
+        version = subprocess.run(
+            [ctags_path, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = version.stdout or version.stderr or ""
+    if "Universal Ctags" not in text:
+        return None
+    try:
+        features = subprocess.run(
+            [ctags_path, "--list-features"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if "json" not in (features.stdout or "").lower():
+        return None
+    first = text.splitlines()[0].strip() if text.strip() else "Universal Ctags"
+    return first
 
 
-_IDENT = r"[A-Za-z_$][\w$]*"
-
-_JAVASCRIPT = _Patterns(
-    functions=_rx(
-        rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*({_IDENT})\s*[<(]",
-        rf"^\s*(?:export\s+)?(?:const|let|var)\s+({_IDENT})\s*(?::[^=]+)?=\s*"
-        rf"(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|{_IDENT}\s*=>)",
-    ),
-    classes=_rx(
-        rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+({_IDENT})",
-        rf"^\s*(?:export\s+)?(?:declare\s+)?(?:interface|enum)\s+({_IDENT})",
-    ),
-    imports=_rx(
-        r"""^\s*import\s+(?:type\s+)?['"]([^'"]+)['"]""",
-        r"""^\s*(?:import|export)\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]""",
-        r"""^\s*\}\s*from\s*['"]([^'"]+)['"]""",  # closing line of a multi-line import
-        r"""\brequire\(\s*['"]([^'"]+)['"]\s*\)""",
-    ),
-)
-
-_PYTHON_FALLBACK = _Patterns(
-    functions=_rx(r"^\s*(?:async\s+)?def\s+(\w+)\s*\("),
-    classes=_rx(r"^\s*class\s+(\w+)"),
-    imports=_rx(r"^\s*import\s+([\w.]+)", r"^\s*from\s+(\.*[\w.]*)\s+import\b"),
-)
-
-_GO = _Patterns(
-    functions=_rx(
-        r"^func\s+\(\s*(?:\w+\s+)?\*?\s*(\w+)(?:\[[^\]]*\])?\s*\)\s*(\w+)\s*[(\[]",
-        r"^func\s+(\w+)\s*[(\[]",
-    ),
-    classes=_rx(r"^type\s+(\w+)(?:\[[^\]]*\])?\s+(?:struct|interface)\b"),
-    imports=_rx(r"""^import\s+(?:[\w.]+\s+)?"([^"]+)\""""),
-)
-_GO_BLOCK_IMPORT = re.compile(r"""^\s*(?:[\w.]+\s+)?"([^"]+)"\s*(?://.*)?$""")
-
-_RUST = _Patterns(
-    functions=_rx(
-        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)"
-    ),
-    classes=_rx(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\s+(\w+)"),
-    imports=_rx(r"^\s*(?:pub\s+)?use\s+([\w:]+)", r"^\s*(?:pub\s+)?extern\s+crate\s+(\w+)"),
-)
-
-_JAVA_LIKE = _Patterns(
-    functions=_rx(
-        r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|open|"
-        r"suspend|async|synchronized)\s+)*fun\s+(?:<[^>]+>\s+)?(?:[\w.]+\.)?(\w+)\s*\(",  # Kotlin
-        r"^\s*(?:@\w+\s+)*(?:(?:public|private|protected|internal|static|final|abstract|"
-        r"synchronized|virtual|override|async)\s+)+[\w<>\[\],.?\s]+?\s+(\w+)\s*\([^;]*$",
-    ),
-    classes=_rx(
-        r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|sealed|open|data|"
-        r"partial)\s+)*(?:class|interface|enum|record|object|struct)\s+(\w+)"
-    ),
-    imports=_rx(r"^\s*import\s+(?:static\s+)?([\w.*]+)", r"^\s*using\s+(?:static\s+)?([\w.]+)\s*;"),
-)
-
-_RUBY = _Patterns(
-    functions=_rx(r"^\s*def\s+(?:self\.)?([\w?!=]+)"),
-    classes=_rx(r"^\s*(?:class|module)\s+([\w:]+)"),
-    imports=_rx(r"""^\s*(?:require|require_relative|load)\s*\(?\s*['"]([^'"]+)['"]"""),
-)
-
-_PHP = _Patterns(
-    functions=_rx(
-        r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*function\s+&?(\w+)"
-    ),
-    classes=_rx(r"^\s*(?:(?:abstract|final)\s+)?(?:class|interface|trait|enum)\s+(\w+)"),
-    imports=_rx(
-        r"^\s*use\s+([\w\\]+)",
-        r"""^\s*(?:require|require_once|include|include_once)\s*\(?\s*['"]([^'"]+)['"]""",
-    ),
-)
-
-_SHELL = _Patterns(
-    functions=_rx(r"^\s*function\s+([\w:.-]+)", r"^\s*([\w:.-]+)\s*\(\)\s*\{?"),
-    imports=_rx(r"""^\s*(?:source|\.)\s+['"]?([^\s'"]+)"""),
-)
-
-_C_LIKE = _Patterns(
-    classes=_rx(r"^\s*(?:typedef\s+)?(?:class|struct|enum|union)\s+(\w+)\s*(?:[:{]|$)"),
-    imports=_rx(r"""^\s*#\s*include\s*[<"]([^>"]+)[>"]"""),
-)
-
-_PROTOBUF = _Patterns(
-    functions=_rx(r"^\s*rpc\s+(\w+)\s*\("),
-    classes=_rx(r"^\s*(?:message|service|enum)\s+(\w+)"),
-    imports=_rx(r"""^\s*import\s+(?:public\s+)?"([^"]+)\""""),
-)
-
-_PATTERNS_BY_LANGUAGE: dict[str, _Patterns] = {
-    "javascript": _JAVASCRIPT,
-    "typescript": _JAVASCRIPT,
-    "go": _GO,
-    "rust": _RUST,
-    "java": _JAVA_LIKE,
-    "kotlin": _JAVA_LIKE,
-    "csharp": _JAVA_LIKE,
-    "ruby": _RUBY,
-    "php": _PHP,
-    "shell": _SHELL,
-    "c": _C_LIKE,
-    "cpp": _C_LIKE,
-    "protobuf": _PROTOBUF,
-}
-
-_HASH_COMMENT_LANGUAGES = frozenset({"python", "shell", "ruby", "php"})
-_MAX_LINE_CHARS = 500  # longer lines are minified or generated; matching them is wasteful
+def require_ctags(ctags_path: str) -> str:
+    """Return the version string, or raise ``CtagsError`` if Ctags cannot be used."""
+    version = probe_ctags(ctags_path)
+    if version is None:
+        raise CtagsError(
+            "Universal Ctags is required for indexing but was not found or is not usable "
+            f"(RA_CTAGS_PATH={ctags_path!r}). Install it with "
+            "`apt install universal-ctags` or `brew install universal-ctags`, and make sure "
+            "the binary supports --output-format=json."
+        )
+    return version
 
 
-def _symbol_name(match: re.Match[str]) -> str:
-    return ".".join(g for g in match.groups() if g)
+def extract_symbols_for_repository(
+    root: Path,
+    paths: Sequence[str],
+    *,
+    ctags_path: str,
+    timeout: float = CTAGS_TIMEOUT_SECONDS,
+) -> dict[str, FileSymbols]:
+    """Run Ctags once over ``paths`` (relative to ``root``) and return symbols by path.
 
+    Raises ``CtagsError`` if the binary is missing or the run fails. Paths that
+    Ctags does not tag (for example Markdown or JSON) simply do not appear.
+    """
+    require_ctags(ctags_path)
+    safe_paths = [path for path in paths if path and "\n" not in path and "\0" not in path]
+    if not safe_paths:
+        return {}
 
-def _extract_with_patterns(text: str, patterns: _Patterns, *, language: str) -> FileSymbols:
-    functions: list[Symbol] = []
-    classes: list[Symbol] = []
-    imports: list[ImportRef] = []
-    in_go_import_block = False
-    for number, raw in enumerate(text.splitlines(), start=1):
-        if len(raw) > _MAX_LINE_CHARS:
-            continue
-        line = raw.rstrip()
-        stripped = line.lstrip()
-        if language == "go":
-            if in_go_import_block:
-                if stripped.startswith(")"):
-                    in_go_import_block = False
-                elif match := _GO_BLOCK_IMPORT.match(line):
-                    imports.append(ImportRef(match.group(1), number))
-                continue
-            if re.match(r"^import\s*\(", line):
-                in_go_import_block = True
-                continue
-        if stripped.startswith(("//", "/*", "*")):
-            continue  # comment (or the body of a block comment)
-        if stripped.startswith("#") and language in _HASH_COMMENT_LANGUAGES:
-            continue
-        for pattern in patterns.functions:
-            if match := pattern.match(line):
-                functions.append(Symbol(_symbol_name(match), number))
-                break
-        for pattern in patterns.classes:
-            if match := pattern.match(line):
-                classes.append(Symbol(_symbol_name(match), number))
-                break
-        for pattern in patterns.imports:
-            if match := pattern.search(line):
-                imports.append(ImportRef(match.group(1), number))
-                break
-    return FileSymbols(tuple(functions), tuple(classes), tuple(imports))
-
-
-def extract_symbols(language: str, text: str) -> FileSymbols:
-    """Return the functions, classes and imports of ``text``, or empty for other languages."""
-    if language == "python":
-        parsed = _extract_python(text)
-        if parsed is not None:
-            return parsed
-        return _extract_with_patterns(text, _PYTHON_FALLBACK, language="python")
-    patterns = _PATTERNS_BY_LANGUAGE.get(language)
-    if patterns is None:
-        return FileSymbols()
-    return _extract_with_patterns(text, patterns, language=language)
+    command = [
+        ctags_path,
+        "--options=NONE",
+        "--output-format=json",
+        "--fields=+nKselr",
+        "--extras=+r",
+        "--extras=-p",
+        "--links=no",
+        "--sort=no",
+        "--map-TypeScript=+.tsx",
+        "--map-JavaScript=+.jsx",
+        "--map-JavaScript=+.cjs",
+        "-L",
+        "-",
+        "-f",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=root,
+            input="\n".join(safe_paths) + "\n",
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CtagsError(
+            f"Universal Ctags timed out after {int(timeout)}s while indexing {root}"
+        ) from exc
+    except OSError as exc:
+        raise CtagsError(
+            f"Universal Ctags could not be started (RA_CTAGS_PATH={ctags_path!r}): {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
+        raise CtagsError(f"Universal Ctags failed while indexing {root}: {detail[0]}")
+    return parse_ctags_json_lines(result.stdout.splitlines(), root=root)

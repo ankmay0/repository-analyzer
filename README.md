@@ -26,7 +26,7 @@ are readable by people and by other tools. A one-page picture of the design is i
 │  POST /workspace/index ──► ingestion/                                          │
 │     fetcher     validate URL, shallow git clone                                │
 │     scanner     allow-listed text files only; no secrets, lockfiles, symlinks  │
-│     symbols     functions / classes / imports (Python: ast; others: regexes)   │
+│ symbols     Universal Ctags: functions, classes, imports                       │
 │     manifests   package.json, pyproject.toml, setup.cfg, requirements, go.mod  │
 │     repo_index  one JSON file per repository: repos/<owner>__<name>.json       │
 │                                                                                │
@@ -41,7 +41,7 @@ Backend layout (`backend/src/repo_analyzer/`):
 | --- | --- |
 | `domain.py` | Immutable value types shared by every layer |
 | `config.py` | All settings, overridable by `RA_*` environment variables |
-| `ingestion/` | Fetch, scan, extract symbols, parse manifests, write the JSON indexes, run indexing jobs |
+| `ingestion/` | Fetch, scan, run Universal Ctags for symbols, parse manifests, write the JSON indexes, run indexing jobs |
 | `agent/` | Tools, system prompt, the LangGraph graph, and the service that streams a turn |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
 | `workspace.py` | The current set of indexed repositories, persisted as `workspace.json` |
@@ -89,10 +89,12 @@ owner for a local directory). Abridged example:
 
 - `dependencies[].kind` is `runtime`, `optional` or `dev`. Manifests under `examples/`,
   `tests/` or `docs/` only ever yield `dev`.
-- `symbols` is present only for files where something was found. Python is parsed with
-  `ast` (methods are named `Class.method`, and `end_line` is known); JavaScript,
-  TypeScript, Go, Rust, Java, Kotlin, C#, Ruby, PHP, shell, C/C++ and protobuf use simple
-  regular expressions and give only a start line.
+- `symbols` is present only for files where something was found. Functions, classes
+  and methods come from [Universal Ctags](https://ctags.io/), run once per repository.
+  Methods are named `Class.method`. `end_line` is included when Ctags provides it.
+  Imports also come only from Ctags (`--extras=+r` reference tags). Coverage varies:
+  Python is reasonably complete; JavaScript and TypeScript currently contribute
+  almost none, and in that case the `imports` list is empty.
 - The JSON holds no file contents and no model-written summaries.
 
 ## Design decisions
@@ -112,9 +114,13 @@ in this repository, what does it declare, where is X defined"; `search_code` (ex
 or regular expression) and `read_file` answer "where is X used" and "how does it work".
 The JSON stays small because it never copies file contents.
 
-**Symbols without parser dependencies.** Python uses the standard library `ast`; other
-languages use per-line regexes. They are right for ordinary code and wrong for unusual
-formatting, so the tool descriptions tell the model they are heuristics.
+**Symbols come from Universal Ctags.** Indexing runs Ctags once over the checkout
+(with `--output-format=json`) rather than shipping a parser per language. Only
+functions, classes and methods are kept (methods as `Class.method`); variables,
+constants, properties and symbols nested inside a function are dropped. Imports
+are whatever Ctags reports as reference tags, which is language-dependent and
+often empty for JavaScript and TypeScript. If Ctags is missing or fails, indexing
+fails with a clear error; there is no fallback parser.
 
 **Repository content is untrusted input.** URLs are validated against a host allow-list
 before `git` runs, with no shell and no option injection. The scanner indexes an allow-list
@@ -125,7 +131,21 @@ not eliminate prompt injection from a hostile repository.
 
 ## Running it
 
-Requirements: Python 3.11+, Node 20+, `git`, and an Anthropic API key for chat.
+Requirements: Python 3.11+, Node 20+, `git`, [Universal Ctags](https://ctags.io/)
+(for indexing), and an Anthropic API key for chat.
+
+Install Universal Ctags if you do not already have it:
+
+```bash
+# Debian / Ubuntu
+sudo apt install universal-ctags
+
+# macOS
+brew install universal-ctags
+```
+
+Check with `ctags --version` — it should say `Universal Ctags`. The path can be
+overridden with `RA_CTAGS_PATH`.
 
 ```bash
 cd backend
@@ -164,12 +184,13 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_ALLOWED_GIT_HOSTS` | github.com, gitlab.com, bitbucket.org | Hosts repositories may be cloned from |
 | `RA_MAX_REPOSITORIES` | `10` | Upper bound per workspace |
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
+| `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
 
 ### API
 
 | Method and path | Description |
 | --- | --- |
-| `GET /api/health` | Liveness and configured model |
+| `GET /api/health` | Liveness, configured model, and whether Universal Ctags is available |
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `done` |
@@ -183,10 +204,11 @@ cd backend && ruff check . && mypy && pytest
 cd frontend && npm run typecheck && npm test && npm run build
 ```
 
-The backend suite runs offline. It indexes small fixture repositories and checks the JSON
-that comes out (file tree, dependencies, symbols, secrets excluded), and it drives the
-tools, the agent and the HTTP API with a scripted chat model, so it covers tool
-execution, streaming and error paths without calling Anthropic.
+The backend suite runs offline (it does not call Anthropic or clone remote repositories).
+Symbol tests feed Ctags JSON as canned lines, so they do not need the binary; one test
+that runs real Ctags is skipped if it is not installed. Indexing the fixture
+repositories in the other tests does require Universal Ctags. The agent and the HTTP
+API are driven with a scripted chat model.
 
 ## Limitations
 
@@ -196,9 +218,11 @@ execution, streaming and error paths without calling Anthropic.
 - **No cross-repository analysis.** There is no dependency graph and no "what breaks if X
   fails" answer. The JSON lists each repository's declared dependencies, and the agent can
   reason from those and from usages it finds, but nothing computes impact.
-- **Heuristic symbols outside Python.** Regex extraction misses unusual formatting and can
-  be fooled by code in strings or comments; it records no end lines. Other file types
-  (JSON, YAML, Markdown, ...) have no symbols.
+- **Symbols are only as complete as Ctags.** Arrow functions assigned to `const` are
+  usually tagged as constants and therefore dropped. TypeScript class methods in `.tsx`
+  files are often missing in current Universal Ctags. Import lists are frequently empty
+  for JavaScript and TypeScript. Variables, type aliases and enums are not recorded.
+  Install Universal Ctags; indexing will not start without it.
 - **Large repositories.** The index is complete, but a single `get_repository_info`
   result is capped at about 40 000 characters; beyond that it drops symbols and then
   files, and says so, so the agent has to ask for one directory at a time with `path`.
