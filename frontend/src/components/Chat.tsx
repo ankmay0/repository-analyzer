@@ -19,8 +19,8 @@ interface Turn {
 }
 
 const EXAMPLE_QUESTIONS = [
-  "How do these repositories depend on each other?",
-  "If markupsafe breaks, which repositories are affected and where do they use it?",
+  "What does each repository declare as its dependencies?",
+  "Which flask modules import from jinja2?",
   "Where does flask configure the Jinja environment?",
 ];
 

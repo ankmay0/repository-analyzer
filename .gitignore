@@ -1,4 +1,4 @@
-# Runtime data: cloned repositories, vector index, workspace state
+# Runtime data: checkouts, per-repository JSON indexes, workspace state
 .data/
 
 # Secrets

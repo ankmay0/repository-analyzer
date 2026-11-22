@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(
         default=Path(".data"),
-        description="Root for cloned repositories, the vector index and workspace state.",
+        description="Root for checkouts, the per-repository JSON indexes and workspace state.",
     )
 
     # --- Repository ingestion -------------------------------------------------
@@ -37,15 +37,6 @@ class Settings(BaseSettings):
     max_repositories: int = Field(default=10, ge=1)
     max_file_bytes: int = Field(default=200_000, ge=1)
 
-    # --- Chunking -------------------------------------------------------------
-    chunk_max_lines: int = Field(default=80, ge=5)
-    chunk_overlap_lines: int = Field(default=10, ge=0)
-
-    # --- Retrieval ------------------------------------------------------------
-    embedding_provider: Literal["fastembed", "hashing"] = "fastembed"
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
-    retrieval_top_k: int = Field(default=8, ge=1, le=50)
-
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     llm_model: str = "claude-opus-5-5"
@@ -60,12 +51,14 @@ class Settings(BaseSettings):
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
 
     @property
-    def repos_dir(self) -> Path:
-        return self.data_dir / "repos"
+    def checkouts_dir(self) -> Path:
+        """Where remote repositories are cloned."""
+        return self.data_dir / "checkouts"
 
     @property
-    def index_dir(self) -> Path:
-        return self.data_dir / "index"
+    def repos_dir(self) -> Path:
+        """Where the per-repository JSON indexes (``<owner>__<name>.json``) are written."""
+        return self.data_dir / "repos"
 
     @property
     def workspace_file(self) -> Path:

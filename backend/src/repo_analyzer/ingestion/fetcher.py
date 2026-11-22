@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 _PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _REPO_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
+LOCAL_OWNER = "local"
+
 
 def parse_remote_url(source: str, allowed_hosts: tuple[str, ...]) -> tuple[str, str]:
     """Validate a remote URL and return ``(canonical_url, repository_name)``."""
@@ -56,13 +58,13 @@ def parse_remote_url(source: str, allowed_hosts: tuple[str, ...]) -> tuple[str, 
 class RepoFetcher:
     def __init__(
         self,
-        repos_dir: Path,
+        checkouts_dir: Path,
         *,
         allowed_hosts: tuple[str, ...],
         allow_local_paths: bool = False,
         clone_timeout_seconds: int = 300,
     ) -> None:
-        self._repos_dir = repos_dir
+        self._checkouts_dir = checkouts_dir
         self._allowed_hosts = allowed_hosts
         self._allow_local_paths = allow_local_paths
         self._clone_timeout = clone_timeout_seconds
@@ -77,13 +79,25 @@ class RepoFetcher:
         if self._is_local(source):
             root = self._local_root(source)
             return RepoSnapshot(
-                name=root.name, source=str(root), root=root, commit=_head_commit(root)
+                name=root.name,
+                owner=LOCAL_OWNER,
+                source=str(root),
+                root=root,
+                commit=_git_output(root, "rev-parse", "HEAD"),
+                default_branch=_git_output(root, "branch", "--show-current"),
             )
 
         url, name = parse_remote_url(source, self._allowed_hosts)
-        dest = self._repos_dir / name
+        dest = self._checkouts_dir / name
         self._clone(url, dest)
-        return RepoSnapshot(name=name, source=url, root=dest, commit=_head_commit(dest))
+        return RepoSnapshot(
+            name=name,
+            owner=url.rstrip("/").split("/")[-2],
+            source=url,
+            root=dest,
+            commit=_git_output(dest, "rev-parse", "HEAD"),
+            default_branch=_git_output(dest, "branch", "--show-current"),
+        )
 
     # -- internals -------------------------------------------------------------
 
@@ -106,7 +120,7 @@ class RepoFetcher:
     def _clone(self, url: str, dest: Path) -> None:
         # Always clone fresh: a shallow re-clone of a small repository is cheap and
         # removes any chance of indexing a half-updated working tree.
-        self._repos_dir.mkdir(parents=True, exist_ok=True)
+        self._checkouts_dir.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             shutil.rmtree(dest)
         command = [
@@ -144,10 +158,11 @@ class RepoFetcher:
             raise RepositoryFetchError("git is not installed on the server") from exc
 
 
-def _head_commit(root: Path) -> str | None:
+def _git_output(root: Path, *args: str) -> str | None:
+    """Run a read-only git query in ``root``; ``None`` if it fails or prints nothing."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            ["git", "-C", str(root), *args],
             check=True,
             capture_output=True,
             text=True,

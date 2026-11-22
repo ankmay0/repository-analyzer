@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, getWorkspace, startIndexing, type Workspace } from "./api";
 import { Chat } from "./components/Chat";
-import { DependencyPanel } from "./components/DependencyPanel";
 import { RepositoryPanel } from "./components/RepositoryPanel";
 
 const POLL_INTERVAL_MS = 1500;
@@ -55,10 +54,6 @@ export function App() {
           </p>
         )}
         <RepositoryPanel workspace={workspace} onIndex={handleIndex} />
-        {workspace && workspace.repositories.length > 0 && (
-          // Re-mount when the index changes so a stale selection is dropped.
-          <DependencyPanel key={workspace.indexed_at} workspace={workspace} />
-        )}
       </aside>
       <main className="main">
         <Chat workspace={workspace} />

@@ -1,9 +1,7 @@
 """Test helpers: fixture repository contents and a scripted chat model.
 
-web-app --runtime--> mid-lib --runtime--> core-lib
-web-app --dev------> core-lib            (also declared, but only for tests)
-tools   --dev------> web-app             (reaches core-lib only through dev edges:
-                                         tools -> web-app -> core-lib, two hops)
+Each fixture repository is a tiny Python project; ``mid-lib`` declares a dependency on
+``core-lib``, ``web-app`` on ``mid-lib`` (and on ``core-lib`` for development only).
 """
 
 from __future__ import annotations

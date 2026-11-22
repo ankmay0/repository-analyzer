@@ -1,4 +1,4 @@
-"""The set of indexed repositories and their dependency graph.
+"""The set of indexed repositories.
 
 ``WorkspaceState`` is an immutable snapshot. ``Workspace`` holds the current
 snapshot, swaps it atomically when an indexing run finishes, and persists it as
@@ -13,32 +13,34 @@ import json
 import logging
 import os
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from repo_analyzer.errors import UnknownRepositoryError
-from repo_analyzer.ingestion.dependency_graph import DependencyGraph
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
 class IndexedRepository:
     name: str
+    owner: str
     source: str
-    root: str
+    root: str  # server-side checkout path; never sent to API clients
     commit: str | None
+    default_branch: str | None
     file_count: int
-    chunk_count: int
+    symbol_count: int  # functions and classes found
+    dependency_count: int
+    index_file: str  # name of the JSON index file inside the repos directory
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceState:
     repositories: tuple[IndexedRepository, ...] = ()
-    graph: DependencyGraph = field(default_factory=lambda: DependencyGraph((), ()))
     indexed_at: str | None = None  # ISO 8601, UTC
 
     def repository(self, name: str) -> IndexedRepository:
@@ -53,14 +55,12 @@ class WorkspaceState:
             "schema_version": _SCHEMA_VERSION,
             "indexed_at": self.indexed_at,
             "repositories": [asdict(r) for r in self.repositories],
-            "graph": self.graph.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkspaceState:
         return cls(
             repositories=tuple(IndexedRepository(**r) for r in data["repositories"]),
-            graph=DependencyGraph.from_dict(data["graph"]),
             indexed_at=data.get("indexed_at"),
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,3 +62,26 @@ def test_local_path_is_used_in_place(tmp_path: Path) -> None:
     assert snapshot.name == "my-repo"
     assert snapshot.root == source.resolve()
     assert snapshot.commit is None  # not a git checkout
+    assert snapshot.default_branch is None
+
+
+def test_local_checkout_reports_owner_commit_and_default_branch(tmp_path: Path) -> None:
+    source = tmp_path / "git-repo"
+    source.mkdir()
+    (source / "a.py").write_text("x = 1\n")
+    git = ["git", "-C", str(source), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q", "-b", "trunk"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+    fetcher = RepoFetcher(tmp_path / "checkouts", allowed_hosts=HOSTS, allow_local_paths=True)
+
+    snapshot = fetcher.fetch(str(source))
+
+    assert snapshot.owner == "local"
+    assert snapshot.default_branch == "trunk"
+    assert snapshot.commit is not None and len(snapshot.commit) == 40
+
+
+def test_the_owner_of_a_remote_repository_comes_from_its_url() -> None:
+    url, _ = parse_remote_url("https://github.com/pallets/flask.git", HOSTS)
+    assert url.split("/")[-2] == "pallets"

@@ -12,8 +12,6 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 from repo_analyzer.api.schemas import (
     ChatRequest,
     HealthOut,
-    ImpactedOut,
-    ImpactOut,
     IndexRequest,
     WorkspaceOut,
 )
@@ -37,7 +35,6 @@ def health(services: ServicesDep) -> HealthOut:
         status="ok",
         llm_configured=services.settings.anthropic_api_key is not None,
         llm_model=services.settings.llm_model,
-        embedder=services.embedder.name,
     )
 
 
@@ -53,18 +50,11 @@ async def start_indexing(body: IndexRequest, services: ServicesDep) -> Workspace
     return WorkspaceOut.build(services.workspace.state, services.jobs.status)
 
 
-@router.get("/workspace/impact/{repo}")
-def get_impact(repo: str, services: ServicesDep) -> ImpactOut:
-    """Repositories affected if ``repo`` fails. Deterministic; does not call the model."""
-    impacted = services.workspace.state.graph.impact_of(repo)
-    return ImpactOut(repo=repo, impacted=[ImpactedOut.from_impacted(i) for i in impacted])
-
-
 @router.post("/chat")
 async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
     """Answer a question as a server-sent event stream.
 
-    Events: ``token`` (answer text), ``tool_call`` (a retrieval step), ``sources``
+    Events: ``token`` (answer text), ``tool_call`` (an agent step), ``sources``
     (file ranges the step returned), ``error``, and a final ``done``.
     """
     # Fail with a proper status code while that is still possible; once the stream

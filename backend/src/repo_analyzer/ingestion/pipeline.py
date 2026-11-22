@@ -1,10 +1,11 @@
-"""Indexing pipeline: fetch -> scan -> chunk -> embed, plus the dependency graph.
+"""Indexing pipeline: fetch -> scan -> describe, writing one JSON file per repository.
 
-A run defines the whole workspace: afterwards exactly the requested
-repositories are indexed and anything previously indexed but not requested is
-removed. The run is not transactional across repositories. If it fails part
-way, the workspace keeps describing the previous run while some repositories
-may already hold fresh chunks; running it again converges.
+A run defines the whole workspace: afterwards exactly the requested repositories
+are indexed and anything previously indexed but not requested is removed. The
+JSON files are written only after every repository has been fetched and
+scanned, so a run that fails while fetching leaves the previous indexes and
+workspace untouched (the checkouts of repositories fetched before the failure
+may already be refreshed). Running it again converges.
 """
 
 from __future__ import annotations
@@ -14,14 +15,16 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from repo_analyzer.config import Settings
-from repo_analyzer.domain import Chunk, Manifest
 from repo_analyzer.errors import InvalidRepositorySourceError
-from repo_analyzer.ingestion.chunker import chunk_file
-from repo_analyzer.ingestion.dependency_graph import DependencyGraph
 from repo_analyzer.ingestion.fetcher import RepoFetcher
-from repo_analyzer.ingestion.manifests import parse_manifest
+from repo_analyzer.ingestion.repo_index import (
+    RepoIndex,
+    RepoIndexStore,
+    build_repo_index,
+    index_filename,
+    symbol_count,
+)
 from repo_analyzer.ingestion.scanner import scan_repository
-from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import IndexedRepository, Workspace, WorkspaceState
 
 logger = logging.getLogger(__name__)
@@ -34,12 +37,12 @@ class IndexingService:
         self,
         settings: Settings,
         fetcher: RepoFetcher,
-        store: VectorStore,
+        index_store: RepoIndexStore,
         workspace: Workspace,
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher
-        self._store = store
+        self._index_store = index_store
         self._workspace = workspace
 
     def validate(self, sources: Sequence[str]) -> None:
@@ -63,54 +66,48 @@ class IndexingService:
     ) -> WorkspaceState:
         self.validate(sources)
         previous = self._workspace.state
-        repositories: list[IndexedRepository] = []
-        manifests: list[Manifest] = []
+        indexed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        described: list[tuple[IndexedRepository, RepoIndex]] = []
 
         for position, source in enumerate(sources, start=1):
             label = f"[{position}/{len(sources)}]"
             on_progress(f"{label} Fetching {source}")
             snapshot = self._fetcher.fetch(source)
 
-            on_progress(f"{label} Reading {snapshot.name}")
-            chunks: list[Chunk] = []
-            file_count = 0
-            for file in scan_repository(
-                snapshot.name, snapshot.root, max_file_bytes=self._settings.max_file_bytes
-            ):
-                file_count += 1
-                chunks.extend(
-                    chunk_file(
-                        file,
-                        max_lines=self._settings.chunk_max_lines,
-                        overlap_lines=self._settings.chunk_overlap_lines,
-                    )
-                )
-                if (manifest := parse_manifest(file)) is not None:
-                    manifests.append(manifest)
-
-            on_progress(f"{label} Embedding {len(chunks)} chunks from {snapshot.name}")
-            self._store.replace_repo(snapshot.name, chunks)
-            repositories.append(
-                IndexedRepository(
-                    name=snapshot.name,
-                    source=snapshot.source,
-                    root=str(snapshot.root),
-                    commit=snapshot.commit,
-                    file_count=file_count,
-                    chunk_count=len(chunks),
-                )
+            on_progress(f"{label} Describing {snapshot.name}")
+            index = build_repo_index(
+                snapshot,
+                scan_repository(
+                    snapshot.name, snapshot.root, max_file_bytes=self._settings.max_file_bytes
+                ),
+                indexed_at=indexed_at,
             )
+            repository = IndexedRepository(
+                name=snapshot.name,
+                owner=snapshot.owner,
+                source=snapshot.source,
+                root=str(snapshot.root),
+                commit=snapshot.commit,
+                default_branch=snapshot.default_branch,
+                file_count=index["stats"]["files"],
+                symbol_count=symbol_count(index),
+                dependency_count=len(index["dependencies"]),
+                index_file=index_filename(snapshot.owner, snapshot.name),
+            )
+            described.append((repository, index))
 
-        names = {repository.name for repository in repositories}
-        for stale in previous.repositories:
-            if stale.name not in names:
-                self._store.delete_repo(stale.name)
+        on_progress("Writing JSON indexes")
+        for _, index in described:
+            self._index_store.save(index)
 
-        state = WorkspaceState(
-            repositories=tuple(repositories),
-            graph=DependencyGraph.from_manifests(names, manifests),
-            indexed_at=datetime.now(UTC).isoformat(timespec="seconds"),
-        )
+        repositories = tuple(repository for repository, _ in described)
+        state = WorkspaceState(repositories=repositories, indexed_at=indexed_at)
         self._workspace.replace(state)
+
+        kept = {repository.index_file for repository in repositories}
+        for stale in previous.repositories:
+            if stale.index_file not in kept:
+                self._index_store.delete(stale.index_file)
+
         on_progress(f"Indexed {len(repositories)} repositories")
         return state

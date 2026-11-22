@@ -9,8 +9,7 @@ import pytest
 from repo_analyzer.config import Settings
 from repo_analyzer.ingestion.fetcher import RepoFetcher
 from repo_analyzer.ingestion.pipeline import IndexingService
-from repo_analyzer.retrieval.embeddings import HashingEmbedder
-from repo_analyzer.retrieval.store import VectorStore
+from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.workspace import Workspace
 from support import FIXTURE_REPOS, write_tree
 
@@ -29,15 +28,12 @@ def settings(tmp_path: Path) -> Settings:
         _env_file=None,
         data_dir=tmp_path / "data",
         allow_local_paths=True,
-        embedding_provider="hashing",
-        chunk_max_lines=20,
-        chunk_overlap_lines=2,
     )
 
 
 @pytest.fixture
-def store(settings: Settings) -> VectorStore:
-    return VectorStore(settings.index_dir, HashingEmbedder())
+def index_store(settings: Settings) -> RepoIndexStore:
+    return RepoIndexStore(settings.repos_dir)
 
 
 @pytest.fixture
@@ -46,11 +42,13 @@ def workspace(settings: Settings) -> Workspace:
 
 
 @pytest.fixture
-def indexing(settings: Settings, store: VectorStore, workspace: Workspace) -> IndexingService:
+def indexing(
+    settings: Settings, index_store: RepoIndexStore, workspace: Workspace
+) -> IndexingService:
     fetcher = RepoFetcher(
-        settings.repos_dir, allowed_hosts=settings.allowed_git_hosts, allow_local_paths=True
+        settings.checkouts_dir, allowed_hosts=settings.allowed_git_hosts, allow_local_paths=True
     )
-    return IndexingService(settings, fetcher, store, workspace)
+    return IndexingService(settings, fetcher, index_store, workspace)
 
 
 @pytest.fixture

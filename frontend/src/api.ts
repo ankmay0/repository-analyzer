@@ -4,21 +4,15 @@ import { parseServerSentEvents } from "./sse";
 
 export interface Repository {
   name: string;
+  owner: string;
   source: string;
   commit: string | null;
+  default_branch: string | null;
   file_count: number;
-  chunk_count: number;
-}
-
-export type DependencyScope = "runtime" | "optional" | "dev";
-
-export interface Edge {
-  source_repo: string;
-  target_repo: string;
-  ecosystem: string;
-  package: string;
-  scope: DependencyScope;
-  manifest_path: string;
+  symbol_count: number;
+  dependency_count: number;
+  /** Name of this repository's JSON index file in the server's data directory. */
+  index_file: string;
 }
 
 export interface Job {
@@ -31,21 +25,8 @@ export interface Job {
 
 export interface Workspace {
   repositories: Repository[];
-  edges: Edge[];
   indexed_at: string | null;
   job: Job;
-}
-
-export interface Impacted {
-  repo: string;
-  distance: number;
-  weak: boolean;
-  path: Edge[];
-}
-
-export interface Impact {
-  repo: string;
-  impacted: Impacted[];
 }
 
 export interface Source {
@@ -107,10 +88,6 @@ export function startIndexing(repositories: string[]): Promise<Workspace> {
     headers: JSON_HEADERS,
     body: JSON.stringify({ repositories }),
   });
-}
-
-export function getImpact(repo: string, signal?: AbortSignal): Promise<Impact> {
-  return request<Impact>(`/api/workspace/impact/${encodeURIComponent(repo)}`, { signal });
 }
 
 /** Ask a question and yield the answer as it is produced. Abort `signal` to stop. */
