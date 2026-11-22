@@ -1,7 +1,7 @@
 """Parse package manifests into what a repository *provides* and *requires*.
 
-This is the deterministic half of the impact analysis: dependency edges come
-from declared manifests, never from the language model. Each parser is a pure
+The dependencies in a repository's JSON index come from declared manifests,
+never from the language model. Each parser is a pure
 function of ``(repo, path, text)`` and returns ``None`` when the file is
 malformed, so one bad manifest cannot fail an indexing run.
 

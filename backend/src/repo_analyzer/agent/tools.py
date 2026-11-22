@@ -7,12 +7,14 @@ Each tool returns ``(content, artifact)``: ``content`` is the text the model
 reads; ``artifact`` is a list of structured source references that the API
 streams to the UI and that never enters the model's context.
 
-Expected failures (unknown repository, bad path) are returned to the model as
-ordinary text so it can correct itself and retry.
+Expected failures (unknown repository, bad path, bad regex) are returned to the
+model as ordinary text so it can correct itself and retry.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -20,15 +22,18 @@ from typing import Any
 from langchain_core.tools import BaseTool, tool
 
 from repo_analyzer.config import Settings
-from repo_analyzer.domain import DependencyEdge
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.ingestion.repo_index import RepoIndex, RepoIndexStore
 from repo_analyzer.ingestion.scanner import language_for, scan_repository
-from repo_analyzer.retrieval.store import VectorStore
 from repo_analyzer.workspace import Workspace, WorkspaceState
 
 MAX_READ_LINES = 400
-MAX_REFERENCE_HITS = 60
-MAX_REFERENCE_LINE_CHARS = 240
+MAX_SEARCH_HITS = 60
+MAX_SEARCH_LINE_CHARS = 240
+MAX_REGEX_LENGTH = 300
+MAX_REGEX_SUBJECT_CHARS = 2_000  # a line is truncated to this before a regex runs on it
+MAX_INFO_CHARS = 40_000  # keeps one get_repository_info result comfortably inside the context
+MAX_INFO_SOURCES = 20
 
 Source = dict[str, Any]
 ToolOutput = tuple[str, list[Source]]
@@ -38,15 +43,63 @@ def _source(repo: str, path: str, start_line: int, end_line: int) -> Source:
     return {"repo": repo, "path": path, "start_line": start_line, "end_line": end_line}
 
 
-def _describe_edge(edge: DependencyEdge) -> str:
-    return (
-        f"{edge.source_repo} -> {edge.target_repo} "
-        f"({edge.scope.value} dependency on {edge.package.ecosystem.value} package "
-        f"'{edge.package.name}', declared in {edge.source_repo}/{edge.manifest_path})"
-    )
+def _normalize_prefix(path: str) -> str:
+    """Turn ``./src/``, ``/src`` or ``src`` into ``src``; ``"."`` or ``""`` into ``""``."""
+    cleaned = PurePosixPath(path.strip().replace("\\", "/")).as_posix().lstrip("/")
+    return "" if cleaned == "." else cleaned
 
 
-def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) -> list[BaseTool]:
+def _under(file_path: str, prefix: str) -> bool:
+    return not prefix or file_path == prefix or file_path.startswith(prefix + "/")
+
+
+def _compact(data: Any) -> str:
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+
+def _render_repository_info(index: RepoIndex, prefix: str) -> tuple[str, int]:
+    """Serialise ``index`` (optionally only files under ``prefix``), shrinking if too large.
+
+    Returns the JSON text and the number of file entries shown. Shrinking first drops
+    per-file symbols, then drops files from the end of the list; either way the
+    result says so, so the model knows to narrow with ``path``.
+    """
+    files = [f for f in index["files"] if _under(f["path"], prefix)]
+    view: dict[str, Any] = {key: value for key, value in index.items() if key != "files"}
+    if prefix:
+        view["path_filter"] = prefix
+        view["files_matching"] = len(files)
+
+    def render(entries: list[dict[str, Any]], note: str | None) -> str:
+        extra = {"note": note} if note else {}
+        return _compact({**view, **extra, "files": entries})
+
+    text = render(files, None)
+    if len(text) <= MAX_INFO_CHARS:
+        return text, len(files)
+
+    hint = "pass `path` (a directory or file) to see the symbols"
+    without_symbols = [{k: v for k, v in f.items() if k != "symbols"} for f in files]
+    text = render(without_symbols, f"Per-file symbols omitted to keep this short; {hint}.")
+    if len(text) <= MAX_INFO_CHARS:
+        return text, len(files)
+
+    shown = len(without_symbols)
+    while shown > 0:
+        shown = shown * 3 // 4
+        text = render(
+            without_symbols[:shown],
+            f"Symbols omitted and the file list cut to the first {shown} of {len(files)}; "
+            "narrow it with `path`.",
+        )
+        if len(text) <= MAX_INFO_CHARS:
+            break
+    return text, shown
+
+
+def build_tools(
+    settings: Settings, index_store: RepoIndexStore, workspace: Workspace
+) -> list[BaseTool]:
     def state() -> WorkspaceState:
         return workspace.state
 
@@ -58,89 +111,79 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
 
     @tool(response_format="content_and_artifact")
     def list_repositories() -> ToolOutput:
-        """List the indexed repositories and the dependency edges declared between them."""
+        """List the indexed repositories with their owner, branch, commit and size."""
         current = state()
         if not current.repositories:
             return "No repositories are indexed yet.", []
         lines = ["Indexed repositories:"]
         lines += [
-            f"- {r.name} ({r.source}, commit {(r.commit or 'unknown')[:12]}, {r.file_count} files)"
+            f"- {r.name} (owner {r.owner}, {r.source}, branch {r.default_branch or 'unknown'}, "
+            f"commit {(r.commit or 'unknown')[:12]}): {r.file_count} files, "
+            f"{r.symbol_count} functions/classes, {r.dependency_count} declared dependencies"
             for r in current.repositories
         ]
-        lines.append("")
-        lines.append("Declared dependency edges (dependent -> dependency):")
-        lines += [f"- {_describe_edge(e)}" for e in current.graph.edges] or ["- none found"]
         return "\n".join(lines), []
 
     @tool(response_format="content_and_artifact")
-    def analyze_impact(repo: str) -> ToolOutput:
-        """Report which indexed repositories are affected if `repo` fails or breaks.
+    def get_repository_info(repo: str, path: str | None = None) -> ToolOutput:
+        """Return a repository's JSON index: basic info, file tree, dependencies and symbols.
 
-        Returns every direct and transitive dependent with the dependency chain that
-        links it to `repo`, based on package manifests. Chains that include an
-        optional or development-only dependency are marked as weak.
+        The JSON has `name`, `owner`, `url`, `default_branch`, `commit`, `indexed_at`,
+        `stats` (file/line counts and languages), `manifests`, `dependencies` (each with a
+        `kind` of runtime, optional or dev, and the manifest that declares it), and `files`.
+        Each file has `path`, `language`, `size_bytes`, `line_count` and, for source files,
+        `symbols`: its `functions`, `classes` and `imports` with line numbers. Symbols for
+        languages other than Python are found heuristically and can miss unusual code.
+
+        Args:
+            repo: Repository name.
+            path: Only include files under this directory (or this one file), for example
+                `src/flask`. Use it on large repositories: without it the symbols may be
+                left out to keep the result short.
         """
 
         def run() -> ToolOutput:
-            current = state()
-            impacted = current.graph.impact_of(repo)
-            if not impacted:
-                return (
-                    f"No indexed repository declares a dependency on {repo}, directly or "
-                    "transitively. Undeclared runtime coupling is not covered by this check.",
-                    [],
-                )
-            lines = [f"If {repo} fails, {len(impacted)} indexed repositories are affected:"]
-            sources: list[Source] = []
-            for item in impacted:
-                strength = "weak: optional/dev dependency on the path" if item.weak else "runtime"
-                lines.append(f"\n{item.repo} (distance {item.distance}, {strength})")
-                for edge in item.path:
-                    lines.append(f"  {_describe_edge(edge)}")
-                    sources.append(_source(edge.source_repo, edge.manifest_path, 1, 1))
-            return "\n".join(lines), sources
+            repository = state().repository(repo)
+            index = index_store.load(repository.index_file)
+            prefix = _normalize_prefix(path) if path else ""
+            if prefix and not any(_under(f["path"], prefix) for f in index["files"]):
+                return f"Error: no indexed files under {path!r} in {repo}", []
+            text, _ = _render_repository_info(index, prefix)
+            sources = [_source(repo, m["path"], 1, 1) for m in index["manifests"]]
+            return text, sources[:MAX_INFO_SOURCES]
 
         return guarded(run)
 
     @tool(response_format="content_and_artifact")
-    def search_code(query: str, repo: str | None = None) -> ToolOutput:
-        """Semantic search over the indexed code and documentation.
+    def search_code(
+        query: str,
+        repo: str | None = None,
+        regex: bool = False,
+        ignore_case: bool = False,
+        path: str | None = None,
+    ) -> ToolOutput:
+        """Search the checked-out files for lines containing text (or matching a regex).
+
+        This is exact matching, not semantic search: use the words the code itself would
+        use, such as an identifier, an import statement, a package name or a config key.
+        Only files the index covers are searched (no secrets, lockfiles or binaries).
 
         Args:
-            query: A natural-language description of what you are looking for.
+            query: The literal text to look for, or a Python regular expression if `regex`.
             repo: Restrict the search to one repository name. Omit to search all.
+            regex: Treat `query` as a regular expression, matched against each line.
+            ignore_case: Match case-insensitively.
+            path: Only search files under this directory (or this one file).
         """
 
         def run() -> ToolOutput:
-            if repo is not None:
-                state().repository(repo)
-            hits = store.search(query, top_k=settings.retrieval_top_k, repo=repo)
-            if not hits:
-                return "No results.", []
-            blocks = [
-                f"[{hit.chunk.citation}] (similarity {hit.score:.2f})\n{hit.chunk.text}"
-                for hit in hits
-            ]
-            sources = [
-                _source(h.chunk.repo, h.chunk.path, h.chunk.start_line, h.chunk.end_line)
-                for h in hits
-            ]
-            return "\n\n---\n\n".join(blocks), sources
+            if not query.strip():
+                return "Error: query must not be empty", []
+            matches = _line_matcher(query, regex=regex, ignore_case=ignore_case)
+            if isinstance(matches, str):
+                return matches, []
+            prefix = _normalize_prefix(path) if path else ""
 
-        return guarded(run)
-
-    @tool(response_format="content_and_artifact")
-    def find_references(text: str, repo: str | None = None) -> ToolOutput:
-        """Find lines containing an exact, case-sensitive piece of text.
-
-        Args:
-            text: The literal text to look for, such as `import markupsafe` or a function name.
-            repo: Restrict the search to one repository name. Omit to search all.
-        """
-
-        def run() -> ToolOutput:
-            if not text.strip():
-                return "Error: text must not be empty", []
             current = state()
             targets = [current.repository(repo)] if repo else list(current.repositories)
             lines: list[str] = []
@@ -150,19 +193,21 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
                 for file in scan_repository(
                     target.name, Path(target.root), max_file_bytes=settings.max_file_bytes
                 ):
+                    if not _under(file.path, prefix):
+                        continue
                     for number, line in enumerate(file.text.splitlines(), start=1):
-                        if text not in line:
+                        if not matches(line):
                             continue
                         total += 1
-                        if len(lines) < MAX_REFERENCE_HITS:
-                            snippet = line.strip()[:MAX_REFERENCE_LINE_CHARS]
+                        if len(lines) < MAX_SEARCH_HITS:
+                            snippet = line.strip()[:MAX_SEARCH_LINE_CHARS]
                             lines.append(f"{file.repo}/{file.path}:{number}: {snippet}")
                             sources.append(_source(file.repo, file.path, number, number))
             if not lines:
-                return f"No lines contain {text!r}.", []
+                return f"No lines match {query!r}.", []
             header = f"{total} matching lines"
             if total > len(lines):
-                header += f" (showing the first {len(lines)}; narrow the text or pass repo)"
+                header += f" (showing the first {len(lines)}; narrow the query, repo or path)"
             return header + ":\n" + "\n".join(lines), sources
 
         return guarded(run)
@@ -175,7 +220,7 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
 
         Args:
             repo: Repository name.
-            path: File path relative to the repository root, as shown in search results.
+            path: File path relative to the repository root, as shown in the JSON index.
             start_line: First line to return (1-based).
             end_line: Last line to return (inclusive). At most 400 lines are returned per call.
         """
@@ -209,4 +254,20 @@ def build_tools(settings: Settings, store: VectorStore, workspace: Workspace) ->
 
         return guarded(run)
 
-    return [list_repositories, analyze_impact, search_code, find_references, read_file]
+    return [list_repositories, get_repository_info, search_code, read_file]
+
+
+def _line_matcher(query: str, *, regex: bool, ignore_case: bool) -> Callable[[str], bool] | str:
+    """Build a per-line predicate, or return an ``Error: ...`` message for a bad regex."""
+    if not regex:
+        if ignore_case:
+            needle = query.lower()
+            return lambda line: needle in line.lower()
+        return lambda line: query in line
+    if len(query) > MAX_REGEX_LENGTH:
+        return f"Error: regex is longer than {MAX_REGEX_LENGTH} characters"
+    try:
+        pattern = re.compile(query, re.IGNORECASE if ignore_case else 0)
+    except re.error as exc:
+        return f"Error: invalid regular expression: {exc}"
+    return lambda line: pattern.search(line[:MAX_REGEX_SUBJECT_CHARS]) is not None

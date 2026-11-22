@@ -66,12 +66,13 @@ export function RepositoryPanel({ workspace, onIndex }: Props) {
       {workspace && workspace.repositories.length > 0 && (
         <ul className="repo-list">
           {workspace.repositories.map((repository) => (
-            <li key={repository.name}>
+            <li key={repository.name} title={repository.index_file}>
               <a href={repository.source} target="_blank" rel="noreferrer">
                 {repository.name}
               </a>
               <span className="muted">
-                {repository.file_count} files
+                {repository.file_count} files · {repository.symbol_count} symbols ·{" "}
+                {repository.dependency_count} deps
                 {repository.commit && <> · {repository.commit.slice(0, 7)}</>}
               </span>
             </li>

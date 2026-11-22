@@ -19,7 +19,7 @@ from support import ScriptedChatModel, tool_call
 def model() -> ScriptedChatModel:
     return ScriptedChatModel(
         responses=[
-            tool_call("find_references", {"text": "sign_token"}),
+            tool_call("search_code", {"query": "sign_token"}),
             AIMessage(content="It is used in mid-lib."),
         ]
     )
@@ -56,12 +56,12 @@ async def test_health(client: httpx.AsyncClient) -> None:
     body = (await client.get("/api/health")).json()
 
     assert body["status"] == "ok"
-    assert body["embedder"] == "hashing:512"
+    assert "embedder" not in body
     assert body["llm_model"] == "claude-opus-5-5"
 
 
-async def test_index_then_inspect_workspace_and_impact(
-    client: httpx.AsyncClient, app: FastAPI, fixture_repos: dict[str, Path]
+async def test_index_then_inspect_workspace_and_json_files(
+    client: httpx.AsyncClient, app: FastAPI, fixture_repos: dict[str, Path], settings: Settings
 ) -> None:
     assert (await client.get("/api/workspace")).json()["repositories"] == []
 
@@ -73,16 +73,20 @@ async def test_index_then_inspect_workspace_and_impact(
     assert [r["name"] for r in workspace["repositories"]] == [
         "core-lib", "mid-lib", "web-app", "tools",
     ]  # fmt: skip
-    assert "root" not in workspace["repositories"][0]  # server paths are not exposed
-    assert len(workspace["edges"]) == 4
+    mid = workspace["repositories"][1]
+    assert mid["owner"] == "local"
+    assert (mid["file_count"], mid["symbol_count"], mid["dependency_count"]) == (2, 1, 1)
+    assert mid["index_file"] == "local__mid-lib.json"
+    assert "root" not in mid  # server paths are not exposed
+    assert "edges" not in workspace and "chunk_count" not in mid
 
-    impact = (await client.get("/api/workspace/impact/core-lib")).json()
-    assert [(i["repo"], i["distance"], i["weak"]) for i in impact["impacted"]] == [
-        ("mid-lib", 1, False),
-        ("web-app", 2, False),
-        ("tools", 2, True),
+    assert sorted(p.name for p in settings.repos_dir.glob("*.json")) == [
+        "local__core-lib.json",
+        "local__mid-lib.json",
+        "local__tools.json",
+        "local__web-app.json",
     ]
-    assert [e["source_repo"] for e in impact["impacted"][1]["path"]] == ["web-app", "mid-lib"]
+    assert settings.workspace_file.is_file()
 
 
 async def test_chat_streams_tool_activity_sources_and_the_answer(
@@ -98,7 +102,7 @@ async def test_chat_streams_tool_activity_sources_and_the_answer(
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(response.text)
     assert [name for name, _ in events] == ["tool_call", "sources", "token", "token", "done"]
-    assert events[0][1] == {"name": "find_references", "args": {"text": "sign_token"}}
+    assert events[0][1] == {"name": "search_code", "args": {"query": "sign_token"}}
     assert {s["repo"] for s in events[1][1]["sources"]} == {"core-lib", "mid-lib"}
     assert "".join(d["text"] for n, d in events if n == "token") == "It is used in mid-lib."
 
@@ -174,8 +178,5 @@ async def test_a_failed_job_reports_its_error_and_keeps_the_previous_workspace(
     assert [r["name"] for r in workspace["repositories"]] == ["core-lib"]
 
 
-async def test_impact_for_unknown_repository_is_404(client: httpx.AsyncClient) -> None:
-    response = await client.get("/api/workspace/impact/nope")
-
-    assert response.status_code == 404
-    assert "Unknown repository" in response.json()["detail"]
+async def test_the_impact_endpoint_is_gone(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/api/workspace/impact/core-lib")).status_code == 404

@@ -1,4 +1,4 @@
-"""Core value types shared across ingestion, retrieval and the agent.
+"""Core value types shared across ingestion and the agent.
 
 Everything here is an immutable value object with no I/O, so the rest of the
 code base can pass these around freely and tests can build them by hand.
@@ -18,7 +18,7 @@ class Ecosystem(StrEnum):
 
 
 class DependencyScope(StrEnum):
-    """How strongly a declared dependency binds the dependent."""
+    """What a declared dependency is needed for (the ``kind`` in the JSON index)."""
 
     RUNTIME = "runtime"
     OPTIONAL = "optional"
@@ -30,9 +30,11 @@ class RepoSnapshot:
     """A repository checked out on local disk at a known revision."""
 
     name: str
+    owner: str  # ``"local"`` for a local directory
     source: str
     root: Path
     commit: str | None
+    default_branch: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,24 +43,6 @@ class SourceFile:
     path: str  # POSIX path relative to the repository root
     language: str
     text: str
-
-
-@dataclass(frozen=True, slots=True)
-class Chunk:
-    repo: str
-    path: str
-    language: str
-    start_line: int  # 1-based, inclusive
-    end_line: int  # 1-based, inclusive
-    text: str
-
-    @property
-    def id(self) -> str:
-        return f"{self.repo}:{self.path}:{self.start_line}-{self.end_line}"
-
-    @property
-    def citation(self) -> str:
-        return f"{self.repo}/{self.path}:{self.start_line}-{self.end_line}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,14 +65,3 @@ class Manifest:
     path: str
     provides: PackageRef | None
     requires: tuple[Requirement, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class DependencyEdge:
-    """``source_repo`` declares a dependency on a package published by ``target_repo``."""
-
-    source_repo: str
-    target_repo: str
-    package: PackageRef
-    scope: DependencyScope
-    manifest_path: str  # where in ``source_repo`` the dependency is declared

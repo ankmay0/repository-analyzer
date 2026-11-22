@@ -19,10 +19,6 @@ class RepositoryFetchError(AnalyzerError):
     """The repository could not be cloned or opened."""
 
 
-class IndexIncompatibleError(AnalyzerError):
-    """The on-disk vector index was built with a different embedding model."""
-
-
 class UnknownRepositoryError(AnalyzerError):
     """A repository name does not exist in the current workspace."""
 

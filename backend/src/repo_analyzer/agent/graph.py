@@ -2,12 +2,11 @@
 
     START -> agent -> (tool calls?) -> tools -> agent -> ... -> END
 
-The model decides which retrieval tools to call and when it has enough evidence
-to answer. This is retrieval-augmented generation with the retrieval step under
-the model's control, which matters here because cross-repository questions
-usually need several hops (find the dependents, then find where each one
-actually uses the dependency) that a fixed retrieve-then-generate pipeline
-cannot plan.
+The model decides which tools to call (look at a repository's JSON index, search
+the code, read a file) and when it has enough evidence to answer. The loop is under
+the model's control because cross-repository questions usually need several hops
+(find where something is declared, then where it is used) that a fixed
+retrieve-then-generate pipeline cannot plan.
 """
 
 from __future__ import annotations

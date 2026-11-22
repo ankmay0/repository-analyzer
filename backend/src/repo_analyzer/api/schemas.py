@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from repo_analyzer.domain import DependencyEdge
-from repo_analyzer.ingestion.dependency_graph import ImpactedRepository
 from repo_analyzer.ingestion.jobs import JobStatus
 from repo_analyzer.workspace import WorkspaceState
 
@@ -21,30 +19,14 @@ class ChatRequest(BaseModel):
 
 class RepositoryOut(BaseModel):
     name: str
+    owner: str
     source: str
     commit: str | None
+    default_branch: str | None
     file_count: int
-    chunk_count: int
-
-
-class EdgeOut(BaseModel):
-    source_repo: str
-    target_repo: str
-    ecosystem: str
-    package: str
-    scope: str
-    manifest_path: str
-
-    @classmethod
-    def from_edge(cls, edge: DependencyEdge) -> EdgeOut:
-        return cls(
-            source_repo=edge.source_repo,
-            target_repo=edge.target_repo,
-            ecosystem=edge.package.ecosystem.value,
-            package=edge.package.name,
-            scope=edge.scope.value,
-            manifest_path=edge.manifest_path,
-        )
+    symbol_count: int
+    dependency_count: int
+    index_file: str
 
 
 class JobOut(BaseModel):
@@ -67,7 +49,6 @@ class JobOut(BaseModel):
 
 class WorkspaceOut(BaseModel):
     repositories: list[RepositoryOut]
-    edges: list[EdgeOut]
     indexed_at: str | None
     job: JobOut
 
@@ -77,42 +58,23 @@ class WorkspaceOut(BaseModel):
             repositories=[
                 RepositoryOut(
                     name=r.name,
+                    owner=r.owner,
                     source=r.source,
                     commit=r.commit,
+                    default_branch=r.default_branch,
                     file_count=r.file_count,
-                    chunk_count=r.chunk_count,
+                    symbol_count=r.symbol_count,
+                    dependency_count=r.dependency_count,
+                    index_file=r.index_file,
                 )
                 for r in state.repositories
             ],
-            edges=[EdgeOut.from_edge(e) for e in state.graph.edges],
             indexed_at=state.indexed_at,
             job=JobOut.from_status(status),
         )
-
-
-class ImpactedOut(BaseModel):
-    repo: str
-    distance: int
-    weak: bool
-    path: list[EdgeOut]
-
-    @classmethod
-    def from_impacted(cls, item: ImpactedRepository) -> ImpactedOut:
-        return cls(
-            repo=item.repo,
-            distance=item.distance,
-            weak=item.weak,
-            path=[EdgeOut.from_edge(e) for e in item.path],
-        )
-
-
-class ImpactOut(BaseModel):
-    repo: str
-    impacted: list[ImpactedOut]
 
 
 class HealthOut(BaseModel):
     status: str
     llm_configured: bool
     llm_model: str
-    embedder: str

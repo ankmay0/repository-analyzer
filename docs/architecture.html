@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Repository Analyzer: Architecture</title>
+<style>
+  :root { --bg:#f6f7fb; --card:#fff; --ink:#1f2433; --muted:#5b6275; --line:#c9cede;
+          --ui:#e8f1ff; --ui-b:#4c8dff; --api:#eefaf1; --api-b:#2fa05a;
+          --ing:#fff6e8; --ing-b:#e8961c; --ret:#f3edff; --ret-b:#8a5cf6;
+          --agt:#ffeef0; --agt-b:#e2475b; --ext:#f1f2f5; --ext-b:#8890a3; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--ink); line-height:1.45; }
+  .wrap { max-width:1000px; margin:0 auto; padding:32px 20px 60px; }
+  h1 { margin:0 0 6px; font-size:28px; }
+  .sub { color:var(--muted); margin:0 0 28px; }
+  .layer { border-radius:14px; padding:18px 20px; border:2px solid; background:var(--card); }
+  .layer h2 { margin:0 0 4px; font-size:18px; }
+  .layer .tag { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; opacity:.8; }
+  .layer p { margin:4px 0 0; color:var(--muted); font-size:14px; }
+  .ui  { background:var(--ui);  border-color:var(--ui-b); }
+  .api { background:var(--api); border-color:var(--api-b); }
+  .arrow { text-align:center; color:var(--muted); font-size:13px; margin:8px 0; }
+  .arrow b { display:block; font-size:22px; line-height:1; color:var(--line); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .chip { background:#fff; border:1px solid var(--line); border-radius:999px; padding:3px 10px; font-size:13px; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+  @media (max-width:820px){ .grid { grid-template-columns:1fr; } }
+  .ing { background:var(--ing); border-color:var(--ing-b); }
+  .ret { background:var(--ret); border-color:var(--ret-b); }
+  .agt { background:var(--agt); border-color:var(--agt-b); }
+  .ext { background:var(--ext); border-color:var(--ext-b); border-style:dashed; }
+  ul.steps { margin:10px 0 0; padding-left:18px; font-size:14px; }
+  ul.steps li { margin:3px 0; }
+  code { background:rgba(0,0,0,.06); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .flows { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:28px; }
+  @media (max-width:820px){ .flows { grid-template-columns:1fr; } }
+  .flow { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+  .flow h3 { margin:0 0 8px; font-size:16px; }
+  .flow ol { margin:0; padding-left:20px; font-size:14px; }
+  .flow li { margin:4px 0; }
+  h2.section { margin:36px 0 12px; font-size:20px; }
+  .note { font-size:13px; color:var(--muted); margin-top:30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Repository Analyzer</h1>
+  <p class="sub">Give it a few GitHub repo links. It writes one simple JSON file describing each repo, then answers questions about them by reading those files and the code.</p>
+
+  <div class="layer ui">
+    <div class="tag">Frontend</div>
+    <h2>React web app (Vite)</h2>
+    <p>Two panels in the browser at <code>localhost:5173</code>.</p>
+    <div class="chips">
+      <span class="chip">Repositories panel: add and index repos</span>
+      <span class="chip">Chat: ask questions about the code</span>
+    </div>
+  </div>
+
+  <div class="arrow"><b>&#8597;</b>HTTP requests, plus a live stream (server-sent events) for chat answers</div>
+
+  <div class="layer api">
+    <div class="tag">Backend API</div>
+    <h2>FastAPI server</h2>
+    <p>Runs at <code>127.0.0.1:8000</code> and routes each request to the right part of the backend.</p>
+    <div class="chips">
+      <span class="chip"><code>POST /api/workspace/index</code></span>
+      <span class="chip"><code>POST /api/chat</code></span>
+      <span class="chip"><code>GET /api/workspace</code></span>
+    </div>
+  </div>
+
+  <div class="arrow"><b>&#8595;</b></div>
+
+  <div class="grid">
+    <div class="layer ing">
+      <div class="tag">1 · Ingestion</div>
+      <h2>Index the repos</h2>
+      <ul class="steps">
+        <li><b>Fetcher</b> checks the URL and clones the repo</li>
+        <li><b>Scanner</b> keeps safe text files only (no secrets, lockfiles or symlinks)</li>
+        <li><b>Symbols</b> lists functions, classes and imports with line numbers (Python <code>ast</code>, simple regexes for other languages)</li>
+        <li><b>Manifests</b> read <code>package.json</code>, <code>pyproject.toml</code>, <code>go.mod</code> and similar</li>
+        <li><b>Writer</b> saves one JSON file per repo</li>
+      </ul>
+    </div>
+    <div class="layer ret">
+      <div class="tag">2 · JSON index</div>
+      <h2>One file per repo</h2>
+      <ul class="steps">
+        <li><b>Basic info:</b> name, owner, URL, branch, commit, time indexed</li>
+        <li><b>File tree:</b> path, language, size, line count</li>
+        <li><b>Dependencies:</b> runtime, optional or dev, from manifests</li>
+        <li><b>Symbols</b> per file, with line numbers</li>
+        <li>No embeddings, no vector database, no file contents, no AI summaries</li>
+      </ul>
+    </div>
+    <div class="layer agt">
+      <div class="tag">3 · AI agent</div>
+      <h2>Answer questions</h2>
+      <ul class="steps">
+        <li><b>LangGraph</b> loop: the agent picks a tool, reads the result, repeats</li>
+        <li>Tools: <code>list_repositories</code>, <code>get_repository_info</code>, <code>search_code</code>, <code>read_file</code></li>
+        <li>Answers cite <code>repo/path:line</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="arrow"><b>&#8595;</b>stored on disk and called out to</div>
+
+  <div class="grid">
+    <div class="layer ext">
+      <div class="tag">Storage</div>
+      <h2>Data folder</h2>
+      <p>In <code>.data/</code>: cloned repos in <code>checkouts/</code>, the JSON files in <code>repos/&lt;owner&gt;__&lt;name&gt;.json</code>, and <code>workspace.json</code>.</p>
+    </div>
+    <div class="layer ext">
+      <div class="tag">External</div>
+      <h2>GitHub / GitLab</h2>
+      <p>Where repos are cloned from. Only allow-listed hosts.</p>
+    </div>
+    <div class="layer ext">
+      <div class="tag">External</div>
+      <h2>Anthropic Claude</h2>
+      <p>The language model behind chat. Only chat needs the API key.</p>
+    </div>
+  </div>
+
+  <h2 class="section">How the main features work</h2>
+  <div class="flows">
+    <div class="flow">
+      <h3>Indexing: "Index these three repos"</h3>
+      <ol>
+        <li>The Repositories panel sends the URLs to <code>/api/workspace/index</code></li>
+        <li>Each repo is cloned, scanned, and its symbols and manifests are read</li>
+        <li>One JSON file per repo is written to <code>.data/repos/</code></li>
+        <li>No AI and no model download, so it is fast and gives the same result every time</li>
+      </ol>
+    </div>
+    <div class="flow">
+      <h3>Chat: "Where does flask use jinja?"</h3>
+      <ol>
+        <li>Chat sends the question to <code>/api/chat</code></li>
+        <li>The agent decides which tools to call, for example <code>get_repository_info</code> for flask's imports, <code>search_code</code> for the exact text, then <code>read_file</code></li>
+        <li>Claude writes the answer using what the tools found</li>
+        <li>The answer streams back word by word, with <code>repo/path:line</code> citations</li>
+      </ol>
+    </div>
+  </div>
+  </div>
+
+  <p class="note">Simplified design: JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
+</div>
+</body>
+</html>

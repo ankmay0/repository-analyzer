@@ -9,9 +9,6 @@
   --accent-text: #ffffff;
   --danger: #b3261e;
   --danger-bg: #fdecea;
-  --warn: #9a5b00;
-  --warn-bg: #fff3d6;
-  --ok-muted: #a9b0ba;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.5;
@@ -28,10 +25,7 @@
     --accent-text: #10131a;
     --danger: #ff8a80;
     --danger-bg: #3a1c1a;
-    --warn: #ffc56b;
-    --warn-bg: #3a2c10;
-    --ok-muted: #5b626c;
-  }
+        }
 }
 
 * {
@@ -130,8 +124,7 @@ button:disabled {
 
 button:focus-visible,
 textarea:focus-visible,
-select:focus-visible,
-.graph-node:focus-visible {
+select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -161,8 +154,7 @@ form > button {
   color: var(--danger);
 }
 
-.repo-list,
-.impact-list {
+.repo-list {
   list-style: none;
   padding: 0;
   margin: 0.75rem 0 0;
@@ -174,86 +166,6 @@ form > button {
   gap: 0.5rem;
   padding: 0.3rem 0;
   border-bottom: 1px solid var(--border);
-}
-
-.impact-list li {
-  padding: 0.5rem 0;
-  border-bottom: 1px solid var(--border);
-  overflow-wrap: anywhere;
-}
-
-.badge {
-  font-size: 0.72rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 999px;
-  vertical-align: middle;
-}
-
-.badge-strong {
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
-.badge-weak {
-  background: var(--warn-bg);
-  color: var(--warn);
-}
-
-/* --- dependency graph --- */
-
-.graph {
-  width: 100%;
-  height: auto;
-  margin: 0.5rem 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-.graph-link {
-  fill: none;
-  stroke: var(--muted);
-  stroke-width: 1.3;
-}
-
-.graph-link-weak {
-  stroke-dasharray: 4 3;
-}
-
-.graph-arrowhead {
-  fill: var(--muted);
-}
-
-.graph-node {
-  cursor: pointer;
-}
-
-.graph-node circle {
-  fill: var(--accent);
-  stroke: var(--bg);
-  stroke-width: 2;
-}
-
-.graph-node text {
-  fill: var(--text);
-  font-size: 11px;
-}
-
-.graph-node-failing circle {
-  fill: var(--danger);
-}
-
-.graph-node-impacted circle {
-  fill: var(--danger);
-  fill-opacity: 0.55;
-}
-
-.graph-node-weak circle {
-  fill: var(--warn);
-}
-
-.graph-node-unaffected circle {
-  fill: var(--ok-muted);
 }
 
 /* --- chat --- */
