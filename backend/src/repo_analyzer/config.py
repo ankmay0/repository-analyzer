@@ -64,6 +64,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Endpoint metadata --------------------------------------------------------
+    endpoint_metadata: bool = Field(
+        default=False,
+        description=(
+            "After indexing, ask the model once per repository for per-endpoint data-flow "
+            "metadata (written next to the JSON index) and give the agent a tool to read it. "
+            "Costs one model call per repository per indexing run."
+        ),
+    )
+
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     llm_model: str = "claude-opus-5-5"

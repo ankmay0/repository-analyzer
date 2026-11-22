@@ -229,6 +229,7 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
 | `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
 | `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
+| `RA_ENDPOINT_METADATA` | `false` | After indexing, ask the model once per repository for per-endpoint data-flow metadata and give the agent a `get_endpoint_metadata` tool |
 
 ### API
 
@@ -259,6 +260,20 @@ by `repo_analyzer.agent.service` as one `chat usage ...` line per answer (also
 attached to the log record as `chat_usage` for structured log handlers), and the
 chat UI shows them under each answer. If the client disconnects mid-answer, no
 usage event or log line is produced for that answer.
+
+## Benchmark
+
+`python -m repo_analyzer.benchmark` answers the known-answer questions in
+[`benchmarks/questions.yaml`](benchmarks/questions.yaml) about the fixture apps in
+`benchmarks/fixtures/`, under four approaches, and records correctness, tokens and
+latency. See [`benchmarks/README.md`](benchmarks/README.md).
+
+| Approach | What the agent gets |
+| --- | --- |
+| `json-github` | Ctags JSON index + live read access to the repository through the GitHub API (no clone) |
+| `json-metadata` | Ctags JSON index + per-endpoint metadata written by the model at index time; no code access |
+| `tools-only` | No index: list, search and read the checkout |
+| `json-embeddings` | Ctags JSON index + top-k similar code chunks from a local embeddings store; no code access |
 
 ## Tests
 

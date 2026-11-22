@@ -7,10 +7,12 @@ Each fixture repository is a tiny Python project; ``mid-lib`` declares a depende
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
+import httpx
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
@@ -157,3 +159,45 @@ def usage(
         total_tokens=input_tokens + output_tokens,
         input_token_details={"cache_read": cache_read, "cache_creation": cache_creation},
     )
+
+
+class FunctionChatModel(ScriptedChatModel):
+    """A chat model whose reply is computed from the messages it receives."""
+
+    responses: list[AIMessage] = []  # noqa: RUF012 - unused; ``respond`` decides
+    respond: Callable[[list[BaseMessage]], AIMessage]
+
+    def _next(self, messages: list[BaseMessage]) -> AIMessage:
+        self.calls.append(list(messages))
+        return self.respond(messages)
+
+
+def github_fixture_transport(
+    local_root: Path, *, owner: str, repo: str, ref: str, prefix: str
+) -> tuple[httpx.MockTransport, list[httpx.Request]]:
+    """Serve ``local_root/<name>/...`` as ``owner/repo@ref:prefix/<name>/...`` on the GitHub API."""
+    requests: list[httpx.Request] = []
+    files = {
+        f"{prefix}/{path.relative_to(local_root).as_posix()}": path
+        for path in sorted(local_root.rglob("*"))
+        if path.is_file()
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = unquote(request.url.path)
+        tree = f"/repos/{owner}/{repo}/git/trees/{ref}"
+        contents = f"/repos/{owner}/{repo}/contents/"
+        if path == tree:
+            entries = [
+                {"path": name, "type": "blob", "size": file.stat().st_size}
+                for name, file in files.items()
+            ]
+            return httpx.Response(200, json={"tree": entries, "truncated": False})
+        if path.startswith(contents) and request.url.params.get("ref") == ref:
+            file = files.get(path[len(contents) :])
+            if file is not None:
+                return httpx.Response(200, content=file.read_bytes())
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    return httpx.MockTransport(handler), requests
