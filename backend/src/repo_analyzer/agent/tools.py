@@ -21,6 +21,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.ingestion.repo_index import RepoIndex, RepoIndexStore
@@ -98,8 +99,13 @@ def _render_repository_info(index: RepoIndex, prefix: str) -> tuple[str, int]:
 
 
 def build_tools(
-    settings: Settings, index_store: RepoIndexStore, workspace: Workspace
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    skills: SkillLibrary | None = None,
 ) -> list[BaseTool]:
+    library = skills if skills is not None else SkillLibrary.load(settings.skills_dir)
+
     def state() -> WorkspaceState:
         return workspace.state
 
@@ -255,7 +261,26 @@ def build_tools(
 
         return guarded(run)
 
-    return [list_repositories, get_repository_info, search_code, read_file]
+    @tool(response_format="content_and_artifact")
+    def load_skill(name: str) -> ToolOutput:
+        """Load the instructions for a named agent skill.
+
+        Call this before answering when a skill in the catalogue fits the question.
+        The result is the skill's markdown body (without frontmatter).
+
+        Args:
+            name: The skill name from the catalogue, for example `repo-navigation`.
+        """
+        available = ", ".join(library.names()) or "none"
+        skill = library.get(name)
+        if skill is None:
+            return (
+                f"Error: Unknown skill {name!r}. Available skills: {available}.",
+                [],
+            )
+        return skill.body, []
+
+    return [list_repositories, get_repository_info, search_code, read_file, load_skill]
 
 
 def _line_matcher(query: str, *, regex: bool, ignore_case: bool) -> Callable[[str], bool] | str:

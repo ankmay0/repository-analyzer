@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from langchain_core.messages import AIMessage
 
+from repo_analyzer.agent.skills import SkillLibrary, default_skills_dir
 from repo_analyzer.api.app import create_app
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
@@ -213,3 +214,13 @@ async def test_index_without_ctags_is_a_503(
         assert response.status_code == 503
         assert "Universal Ctags is required" in response.json()["detail"]
         assert (await http.get("/api/workspace")).json()["job"]["state"] == "idle"
+
+
+async def test_list_skills(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/api/skills")).json()
+
+    names = [item["name"] for item in body]
+    assert names == sorted(SkillLibrary.load(default_skills_dir()).names())
+    review = next(item for item in body if item["name"] == "dependency-review")
+    assert "dependencies" in review["description"]
+    assert "body" not in review

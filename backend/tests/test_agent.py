@@ -131,3 +131,34 @@ async def test_missing_credentials_surface_as_an_error_event(
 
     assert [e.type for e in events] == ["error", "done"]
     assert "ANTHROPIC_API_KEY" in events[0].data["message"]
+
+
+async def test_agent_loads_a_skill_then_answers(
+    settings: Settings, index_store: RepoIndexStore, indexed_workspace: Workspace
+) -> None:
+    model = ScriptedChatModel(
+        responses=[
+            tool_call("load_skill", {"name": "dependency-review"}),
+            AIMessage(content="Declared dependencies are in the JSON index."),
+        ]
+    )
+    service = make_service(model, settings, index_store, indexed_workspace)
+
+    events = await collect(service, "t1", "What depends on core-lib?")
+
+    assert [e.type for e in events] == ["tool_call", "token", "token", "done"]
+    assert events[0].data == {"name": "load_skill", "args": {"name": "dependency-review"}}
+    # load_skill has no source artifacts, so no sources event.
+    assert "".join(e.data["text"] for e in events if e.type == "token") == (
+        "Declared dependencies are in the JSON index."
+    )
+
+    first, second = model.calls
+    assert isinstance(first[0], SystemMessage)
+    assert "Available skills:" in str(first[0].content)
+    assert "dependency-review:" in str(first[0].content)
+    assert "call `load_skill`" in str(first[0].content)
+    tool_result = second[-1]
+    assert isinstance(tool_result, ToolMessage)
+    assert "# Dependency review" in str(tool_result.content)
+    assert "cannot compute" in str(tool_result.content)

@@ -102,7 +102,8 @@
       <h2>Answer questions</h2>
       <ul class="steps">
         <li><b>LangGraph</b> loop: the agent picks a tool, reads the result, repeats</li>
-        <li>Tools: <code>list_repositories</code>, <code>get_repository_info</code>, <code>search_code</code>, <code>read_file</code></li>
+        <li>Tools: <code>list_repositories</code>, <code>get_repository_info</code>, <code>search_code</code>, <code>read_file</code>, <code>load_skill</code></li>
+        <li>A short system prompt plus a catalogue of Agent Skills; the agent loads a skill with <code>load_skill</code> when it fits</li>
         <li>Answers cite <code>repo/path:line</code></li>
       </ul>
     </div>
@@ -148,7 +149,7 @@
       <h3>Chat: "Where does flask use jinja?"</h3>
       <ol>
         <li>Chat sends the question to <code>/api/chat</code></li>
-        <li>The agent decides which tools to call, for example <code>get_repository_info</code> for flask's imports, <code>search_code</code> for the exact text, then <code>read_file</code></li>
+        <li>The agent may call <code>load_skill</code> (for example <code>trace-feature</code>), then <code>get_repository_info</code>, <code>search_code</code> and <code>read_file</code></li>
         <li>Claude writes the answer using what the tools found</li>
         <li>The answer streams back word by word, with <code>repo/path:line</code> citations</li>
       </ol>
@@ -156,7 +157,7 @@
   </div>
   </div>
 
-  <p class="note">Symbols come from Universal Ctags (no ast or regex fallback). JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
+  <p class="note">The agent's long instructions live in Agent Skills under <code>backend/skills/</code>; Universal Ctags provides symbols (no ast or regex fallback). JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
 </div>
 </body>
 </html>

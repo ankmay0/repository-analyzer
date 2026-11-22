@@ -14,6 +14,15 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def default_skills_dir() -> Path:
+    """Packaged skills, or ``backend/skills`` when running from a source checkout."""
+    here = Path(__file__).resolve().parent  # repo_analyzer/
+    packaged = here / "skills"
+    if packaged.is_dir():
+        return packaged
+    return here.parents[1] / "skills"  # backend/src/repo_analyzer -> backend/skills
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RA_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -43,6 +52,15 @@ class Settings(BaseSettings):
         description=(
             "Path to the Universal Ctags binary used to extract functions, "
             "classes and imports. Indexing fails if this is missing or unusable."
+        ),
+    )
+
+    # --- Agent skills ------------------------------------------------------------
+    skills_dir: Path = Field(
+        default_factory=default_skills_dir,
+        description=(
+            "Directory of Agent Skills (each a subdirectory with SKILL.md). "
+            "Defaults to the packaged skills shipped with the server."
         ),
     )
 

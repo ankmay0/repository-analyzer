@@ -9,6 +9,7 @@ from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer.agent.llm import build_chat_model
 from repo_analyzer.agent.service import ChatService
+from repo_analyzer.agent.skills import SkillLibrary, build_system_prompt
 from repo_analyzer.agent.tools import build_tools
 from repo_analyzer.config import Settings
 from repo_analyzer.ingestion.fetcher import RepoFetcher
@@ -24,6 +25,7 @@ class Services:
     workspace: Workspace
     jobs: IndexJobRunner
     chat: ChatService
+    skills: SkillLibrary
 
 
 def build_services(
@@ -40,16 +42,19 @@ def build_services(
         clone_timeout_seconds=settings.git_clone_timeout_seconds,
     )
     indexing = IndexingService(settings, fetcher, index_store, workspace)
+    skills = SkillLibrary.load(settings.skills_dir)
     chat = ChatService(
         model_factory or (lambda: build_chat_model(settings)),
-        build_tools(settings, index_store, workspace),
+        build_tools(settings, index_store, workspace, skills),
         recursion_limit=settings.agent_recursion_limit,
         # Scripted test models do not accept provider-specific call options.
         prompt_caching=model_factory is None,
+        system_prompt=build_system_prompt(skills),
     )
     return Services(
         settings=settings,
         workspace=workspace,
         jobs=IndexJobRunner(indexing),
         chat=chat,
+        skills=skills,
     )

@@ -21,6 +21,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, build_agent_graph
+from repo_analyzer.agent.prompts import SYSTEM_PROMPT
 from repo_analyzer.errors import AnalyzerError
 
 logger = logging.getLogger(__name__)
@@ -42,11 +43,13 @@ class ChatService:
         *,
         recursion_limit: int,
         prompt_caching: bool = True,
+        system_prompt: str = SYSTEM_PROMPT,
     ) -> None:
         self._model_factory = model_factory
         self._tools = tools
         self._recursion_limit = recursion_limit
         self._prompt_caching = prompt_caching
+        self._system_prompt = system_prompt
         # Conversation history lives in process memory: it is lost on restart and is
         # not shared between workers. Swap in a durable checkpointer to change that.
         self._checkpointer = InMemorySaver()
@@ -60,6 +63,7 @@ class ChatService:
                 self._tools,
                 self._checkpointer,
                 prompt_caching=self._prompt_caching,
+                system_prompt=self._system_prompt,
             )
 
     async def stream(self, thread_id: str, message: str) -> AsyncIterator[ChatEvent]:

@@ -27,7 +27,13 @@ def call(tool: BaseTool, **args: Any) -> tuple[str, list[dict[str, Any]]]:
 
 
 def test_the_agent_gets_exactly_the_four_tools(tools: dict[str, BaseTool]) -> None:
-    assert sorted(tools) == ["get_repository_info", "list_repositories", "read_file", "search_code"]
+    assert sorted(tools) == [
+        "get_repository_info",
+        "list_repositories",
+        "load_skill",
+        "read_file",
+        "search_code",
+    ]
 
 
 def test_list_repositories_shows_repos_and_their_sizes(tools: dict[str, BaseTool]) -> None:
@@ -201,3 +207,37 @@ def test_read_file_refuses_a_symlink_that_escapes_the_repository(
     content, _ = call(tools["read_file"], repo="core-lib", path="link.py")
 
     assert content.startswith("Error:") and "hunter2" not in content
+
+
+def test_load_skill_returns_the_body_without_frontmatter(tools: dict[str, BaseTool]) -> None:
+    content, sources = call(tools["load_skill"], name="repo-navigation")
+
+    assert content.startswith("# Repository navigation")
+    assert "list_repositories" in content
+    assert "name: repo-navigation" not in content
+    assert sources == []
+
+
+def test_load_skill_unknown_name_lists_the_valid_ones(tools: dict[str, BaseTool]) -> None:
+    content, sources = call(tools["load_skill"], name="no-such-skill")
+
+    assert content.startswith("Error: Unknown skill 'no-such-skill'.")
+    assert "Available skills:" in content
+    assert "repo-navigation" in content and "dependency-review" in content
+    assert sources == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../secrets", "foo/../../etc/passwd", "repo-navigation/SKILL.md", ""],
+)
+def test_load_skill_rejects_path_traversal_and_invalid_names(
+    tools: dict[str, BaseTool], name: str
+) -> None:
+    content, sources = call(tools["load_skill"], name=name)
+
+    assert content.startswith("Error: Unknown skill")
+    assert "Available skills:" in content
+    assert sources == []
+    # The tool must not echo file contents from outside the catalogue.
+    assert "ANTHROPIC_API_KEY" not in content
