@@ -238,9 +238,27 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/skills` | Installed Agent Skills (name and description only) |
-| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `done` |
+| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `usage`, `done` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
+
+### Token usage per answer
+
+Every chat answer ends with a `usage` event just before `done`:
+
+```json
+{"input_tokens": 4400, "output_tokens": 95, "total_tokens": 4495,
+ "cache_read_tokens": 2400, "cache_creation_tokens": 1000,
+ "llm_calls": 3, "tool_calls": 2, "latency_ms": 5320}
+```
+
+Tokens are summed over every model call in the agent loop. `input_tokens` already
+includes prompt-cache reads and writes; the two `cache_*` fields show how much.
+`latency_ms` is wall-clock time for the whole answer. The same numbers are logged
+by `repo_analyzer.agent.service` as one `chat usage ...` line per answer (also
+attached to the log record as `chat_usage` for structured log handlers), and the
+chat UI shows them under each answer. If the client disconnects mid-answer, no
+usage event or log line is produced for that answer.
 
 ## Tests
 

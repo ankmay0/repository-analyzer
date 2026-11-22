@@ -14,6 +14,7 @@ from typing import Any
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 FIXTURE_REPOS: dict[str, dict[str, str]] = {
@@ -116,16 +117,43 @@ class ScriptedChatModel(BaseChatModel):
                     }
                     for index, call in enumerate(message.tool_calls)
                 ],
+                usage_metadata=message.usage_metadata,
             )
             yield ChatGenerationChunk(message=chunk)
             return
         text = str(message.content)
-        for piece in (text[: len(text) // 2], text[len(text) // 2 :]):
-            chunk = AIMessageChunk(content=piece)
+        pieces = (text[: len(text) // 2], text[len(text) // 2 :])
+        for position, piece in enumerate(pieces):
+            # Like Anthropic, report usage once, on the final chunk.
+            last = position == len(pieces) - 1
+            chunk = AIMessageChunk(
+                content=piece, usage_metadata=message.usage_metadata if last else None
+            )
             if run_manager:
                 run_manager.on_llm_new_token(piece, chunk=ChatGenerationChunk(message=chunk))
             yield ChatGenerationChunk(message=chunk)
 
 
-def tool_call(name: str, args: dict[str, Any], call_id: str = "call-1") -> AIMessage:
-    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+def tool_call(
+    name: str,
+    args: dict[str, Any],
+    call_id: str = "call-1",
+    usage: UsageMetadata | None = None,
+) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": args, "id": call_id}],
+        usage_metadata=usage,
+    )
+
+
+def usage(
+    input_tokens: int, output_tokens: int, *, cache_read: int = 0, cache_creation: int = 0
+) -> UsageMetadata:
+    """Usage in LangChain's shape; ``input_tokens`` includes the cache tokens."""
+    return UsageMetadata(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        input_token_details={"cache_read": cache_read, "cache_creation": cache_creation},
+    )
