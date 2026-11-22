@@ -39,10 +39,12 @@ def build_agent_graph(
     checkpointer: BaseCheckpointSaver[Any],
     *,
     prompt_caching: bool = True,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     model_with_tools = model.bind_tools(list(tools))
     call_options: dict[str, Any] = {"cache_control": _CACHE_CONTROL} if prompt_caching else {}
-    system_message = SystemMessage(SYSTEM_PROMPT)
+    # Built once: the catalogue is static for the process, so prompt caching stays valid.
+    system_message = SystemMessage(system_prompt)
 
     async def call_model(state: MessagesState) -> dict[str, Any]:
         response = await model_with_tools.ainvoke(

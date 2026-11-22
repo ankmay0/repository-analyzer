@@ -33,6 +33,12 @@ repo-analyzer = "repo_analyzer.__main__:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/repo_analyzer"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "repo_analyzer/skills"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/repo_analyzer", "skills"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]

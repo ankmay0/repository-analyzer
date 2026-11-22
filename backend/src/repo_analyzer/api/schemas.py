@@ -80,3 +80,8 @@ class HealthOut(BaseModel):
     llm_model: str
     ctags_available: bool
     ctags_version: str | None
+
+
+class SkillOut(BaseModel):
+    name: str
+    description: str

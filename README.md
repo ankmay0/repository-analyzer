@@ -26,12 +26,13 @@ are readable by people and by other tools. A one-page picture of the design is i
 │  POST /workspace/index ──► ingestion/                                          │
 │     fetcher     validate URL, shallow git clone                                │
 │     scanner     allow-listed text files only; no secrets, lockfiles, symlinks  │
-│ symbols     Universal Ctags: functions, classes, imports                       │
+│     symbols     Universal Ctags: functions, classes, imports                   │
 │     manifests   package.json, pyproject.toml, setup.cfg, requirements, go.mod  │
 │     repo_index  one JSON file per repository: repos/<owner>__<name>.json       │
 │                                                                                │
 │  POST /chat ──► agent/   LangGraph:  START → agent ⇄ tools → END               │
-│     tools: list_repositories, get_repository_info, search_code, read_file      │
+│     tools: list_repositories, get_repository_info, search_code,                │
+│            read_file, load_skill                                               │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -42,7 +43,7 @@ Backend layout (`backend/src/repo_analyzer/`):
 | `domain.py` | Immutable value types shared by every layer |
 | `config.py` | All settings, overridable by `RA_*` environment variables |
 | `ingestion/` | Fetch, scan, run Universal Ctags for symbols, parse manifests, write the JSON indexes, run indexing jobs |
-| `agent/` | Tools, system prompt, the LangGraph graph, and the service that streams a turn |
+| `agent/` | Tools (including `load_skill`), system prompt, skill loader, the LangGraph graph, and the service that streams a turn |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
 | `workspace.py` | The current set of indexed repositories, persisted as `workspace.json` |
 
@@ -129,6 +130,48 @@ and `read_file` apply the same rules, and `read_file` cannot leave the checkout.
 system prompt tells the model to treat repository content as data, which reduces but does
 not eliminate prompt injection from a hostile repository.
 
+## Agent skills
+
+The chat agent is given a short system prompt (its role, the untrusted-content
+rule, how to cite `repo/path:line`, and brevity) plus a catalogue of **Agent
+Skills**. Each skill is a folder of markdown that teaches it how to handle a
+kind of question. When a skill fits, the model calls `load_skill` and follows
+the instructions. The catalogue is built once at process start, so prompt
+caching is unaffected.
+
+Shipped skills live in [`backend/skills/`](backend/skills):
+
+| Skill | When to use it |
+| --- | --- |
+| `repo-navigation` | Exploring a workspace, looking up files or symbols, searching or reading code |
+| `answer-with-citations` | Any answer that states facts about the indexed repositories |
+| `explain-architecture` | Architecture, structure, overview, or "how does this project work" |
+| `trace-feature` | "Where is X handled", tracing a flow or feature across files |
+| `dependency-review` | Declared dependencies, hidden coupling, or "what breaks if X fails" |
+
+### Adding a skill
+
+1. Create `backend/skills/<skill-name>/SKILL.md`. The folder name must be
+   lowercase letters, numbers and hyphens (no leading, trailing or doubled
+   hyphen), and must match the `name` in the frontmatter.
+2. Start the file with YAML frontmatter. `name` and `description` are required.
+   The description should say **what** the skill does and **when** to use it, in
+   the third person, and must not contain XML tags:
+   ```markdown
+   ---
+   name: my-skill
+   description: Does X. Use when the question is about Y.
+   ---
+
+   # My skill
+
+   Step-by-step instructions for the agent...
+   ```
+3. Restart the server. Invalid files are skipped (and logged) rather than
+   taking the process down. Point `RA_SKILLS_DIR` at another directory to load
+   a different set. `GET /api/skills` lists the names and descriptions that
+   were loaded.
+
 ## Running it
 
 Requirements: Python 3.11+, Node 20+, `git`, [Universal Ctags](https://ctags.io/)
@@ -185,6 +228,7 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_MAX_REPOSITORIES` | `10` | Upper bound per workspace |
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
 | `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
+| `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
 
 ### API
 
@@ -193,6 +237,7 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/health` | Liveness, configured model, and whether Universal Ctags is available |
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
+| `GET /api/skills` | Installed Agent Skills (name and description only) |
 | `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `done` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
@@ -208,7 +253,8 @@ The backend suite runs offline (it does not call Anthropic or clone remote repos
 Symbol tests feed Ctags JSON as canned lines, so they do not need the binary; one test
 that runs real Ctags is skipped if it is not installed. Indexing the fixture
 repositories in the other tests does require Universal Ctags. The agent and the HTTP
-API are driven with a scripted chat model.
+API are driven with a scripted chat model. Skill tests cover parsing, invalid
+frontmatter, the catalogue in the system prompt, and the `load_skill` tool.
 
 ## Limitations
 

@@ -13,6 +13,7 @@ from repo_analyzer.api.schemas import (
     ChatRequest,
     HealthOut,
     IndexRequest,
+    SkillOut,
     WorkspaceOut,
 )
 from repo_analyzer.api.services import Services
@@ -40,6 +41,14 @@ def health(services: ServicesDep) -> HealthOut:
         ctags_available=version is not None,
         ctags_version=version,
     )
+
+
+@router.get("/skills")
+def list_skills(services: ServicesDep) -> list[SkillOut]:
+    """Installed Agent Skills (name and description). The bodies load via the chat tool."""
+    return [
+        SkillOut(name=skill.name, description=skill.description) for skill in services.skills.list()
+    ]
 
 
 @router.get("/workspace")
