@@ -13,19 +13,23 @@ from fastapi.responses import JSONResponse
 from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer import __version__
+from repo_analyzer.api.compare_routes import router as compare_router
 from repo_analyzer.api.routes import router
 from repo_analyzer.api.services import build_services
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import (
     AnalyzerError,
+    BenchmarkUnavailableError,
     CtagsError,
     IndexingInProgressError,
+    InvalidBenchmarkRequestError,
     InvalidRepositorySourceError,
     LLMNotConfiguredError,
     RepositoryFetchError,
     UnknownRepositoryError,
     WorkspaceEmptyError,
 )
+from repo_analyzer.retrieval.embeddings import Embedder
 
 _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
     InvalidRepositorySourceError: 400,
@@ -35,6 +39,8 @@ _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
     RepositoryFetchError: 502,
     LLMNotConfiguredError: 503,
     CtagsError: 503,
+    BenchmarkUnavailableError: 503,
+    InvalidBenchmarkRequestError: 400,
 }
 
 
@@ -42,10 +48,15 @@ def create_app(
     settings: Settings | None = None,
     *,
     model_factory: Callable[[], BaseChatModel] | None = None,
+    benchmark_embedder_factory: Callable[[], Embedder] | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     app = FastAPI(title="Repository Analyzer", version=__version__)
-    app.state.services = build_services(settings, model_factory=model_factory)
+    app.state.services = build_services(
+        settings,
+        model_factory=model_factory,
+        benchmark_embedder_factory=benchmark_embedder_factory,
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -60,4 +71,5 @@ def create_app(
         return JSONResponse(status_code=status, content={"detail": str(exc)})
 
     app.include_router(router, prefix="/api")
+    app.include_router(compare_router, prefix="/api/compare")
     return app

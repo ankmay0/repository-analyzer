@@ -1,0 +1,347 @@
+# Known-answer questions about the fixture apps in benchmarks/fixtures/.
+#
+# Index both fixtures (shop-api and shop-web) before asking. Each question has:
+#   id               stable identifier
+#   category         data-source | caching | schema | flow | transformation | external | frontend | config
+#   question         what to ask the analyzer, verbatim
+#   expected_answer  a reference answer written from the code
+#   key_facts        facts a correct answer must contain. Grading is case-insensitive
+#                    substring matching; alternatives are separated by " | "
+#                    (any one alternative counts as the fact being present).
+#   evidence         files (repo/path) that prove the answer; checked by tests to exist
+version: 1
+repositories: [shop-api, shop-web]
+questions:
+  - id: summary-data-source
+    category: data-source
+    question: Where does the GET /customers/{customer_id}/summary endpoint get its data from?
+    expected_answer: >-
+      It runs one aggregate SQL query on the PostgreSQL `orders` table
+      (count, sum of total_cents, max created_at) for that customer, counting only
+      orders whose status is 'paid' or 'fulfilled'. The result is cached in process
+      memory for 60 seconds per customer (key customer-summary:{id}).
+    key_facts:
+      - "orders"
+      - "paid"
+      - "fulfilled"
+      - "60 | sixty"
+      - "cache"
+    evidence:
+      - shop-api/app/routers/customers.py
+      - shop-api/app/cache.py
+      - shop-api/app/config.py
+
+  - id: caching-overview
+    category: caching
+    question: Which endpoints are cached, for how long, and where does the cache live?
+    expected_answer: >-
+      Two: GET /customers/{id}/summary for 60 seconds per customer and GET /products
+      (active catalog, one shared key) for 300 seconds / 5 minutes. Both use the
+      tiny in-process TTL dict in app/cache.py, so the cache is per worker, not shared,
+      lost on restart; there is no Redis. GET /orders is not cached.
+    key_facts:
+      - "summary"
+      - "/products"
+      - "60 | sixty"
+      - "300 | 5 min | five min"
+      - "in-process | in-memory | process memory | per worker | per-process"
+    evidence:
+      - shop-api/app/cache.py
+      - shop-api/app/config.py
+      - shop-api/app/routers/products.py
+
+  - id: cache-invalidation
+    category: caching
+    question: When are cached values invalidated before their TTL expires?
+    expected_answer: >-
+      create_order calls invalidate("products:") so stock changes show in the catalog;
+      mark_order_paid and fulfill_order call invalidate("customer-summary:{customer_id}")
+      so the customer's totals refresh.
+    key_facts:
+      - "create_order | creating an order | order is created | POST /orders"
+      - "products"
+      - "fulfill"
+      - "pay | paid"
+      - "customer-summary | customer summary"
+    evidence:
+      - shop-api/app/routers/orders.py
+      - shop-api/app/routers/fulfillment.py
+
+  - id: tables
+    category: schema
+    question: What database tables does the shop backend use, and how are they related?
+    expected_answer: >-
+      Five PostgreSQL tables from migrations/: customers; products (keyed by sku);
+      orders (customer_id -> customers); order_items (order_id -> orders, sku ->
+      products, primary key (order_id, sku)); fulfillments (order_id unique -> orders).
+    key_facts:
+      - "customers"
+      - "products"
+      - "orders"
+      - "order_items"
+      - "fulfillments"
+    evidence:
+      - shop-api/migrations/001_initial_schema.sql
+      - shop-api/migrations/002_fulfillments.sql
+
+  - id: money-representation
+    category: transformation
+    question: How is money stored, returned by the API, and displayed in the UI?
+    expected_answer: >-
+      Stored as integer cents in PostgreSQL (*_cents columns). The API converts to
+      dollars as floats with cents_to_dollars (round(cents / 100, 2)) when building
+      responses. The React app formats those dollars as USD with Intl.NumberFormat
+      in formatMoney.
+    key_facts:
+      - "cents"
+      - "cents_to_dollars"
+      - "dollars"
+      - "Intl.NumberFormat | formatMoney"
+    evidence:
+      - shop-api/app/services/pricing.py
+      - shop-api/app/routers/orders.py
+      - shop-web/src/format.ts
+
+  - id: order-pricing
+    category: transformation
+    question: How is an order's total calculated?
+    expected_answer: >-
+      price_order: subtotal = sum(unit price x quantity); gold-tier customers get 10%
+      off the subtotal; shipping is $5.99 unless the discounted subtotal is at least
+      $50; tax is 8.25% of the discounted subtotal (shipping is not taxed); total =
+      discounted subtotal + tax + shipping.
+    key_facts:
+      - "8.25"
+      - "10% | 0.10 | ten percent"
+      - "gold"
+      - "5.99 | 599"
+      - "50"
+    evidence:
+      - shop-api/app/services/pricing.py
+
+  - id: place-order-flow
+    category: flow
+    question: Walk me through what happens end to end when staff place an order in the web app.
+    expected_answer: >-
+      OrderForm (shop-web) calls api.createOrder -> POST /orders. create_order checks
+      the customer exists, locks each product row with SELECT ... FOR UPDATE, rejects
+      unknown products (422) and insufficient stock (409), prices the cart with
+      price_order, inserts the orders row and order_items rows, decrements
+      products.stock_quantity, all in one transaction, then invalidates the products
+      cache. The UI then invalidates its orders and products queries.
+    key_facts:
+      - "OrderForm"
+      - "POST /orders | createOrder"
+      - "FOR UPDATE | lock"
+      - "409 | not enough stock | insufficient stock"
+      - "order_items"
+      - "stock_quantity | decrement | reduce stock"
+    evidence:
+      - shop-web/src/components/OrderForm.tsx
+      - shop-web/src/api/client.ts
+      - shop-api/app/routers/orders.py
+
+  - id: fulfillment-flow
+    category: flow
+    question: How does order fulfillment work, and what happens if the carrier call fails?
+    expected_answer: >-
+      The Ship button (OrderTable, only for paid orders) calls POST
+      /orders/{id}/fulfill. fulfill_order locks the order, requires status 'paid'
+      (else 409), sums item quantities as the parcel count and calls
+      book_shipment on the carrier API. If the carrier fails it returns 502 and
+      writes nothing. On success it inserts a fulfillments row with the tracking
+      number, sets the order to 'fulfilled' and invalidates the customer summary cache.
+    key_facts:
+      - "paid"
+      - "book_shipment | carrier"
+      - "502"
+      - "fulfillments"
+      - "tracking"
+      - "fulfilled"
+    evidence:
+      - shop-api/app/routers/fulfillment.py
+      - shop-api/app/services/carrier.py
+      - shop-web/src/components/OrderTable.tsx
+
+  - id: external-services
+    category: external
+    question: Which external systems does the backend depend on?
+    expected_answer: >-
+      PostgreSQL (DATABASE_URL, psycopg connection pool) and the ParcelPoint carrier
+      HTTP API: POST {CARRIER_API_URL}/v2/shipments with a Bearer CARRIER_API_KEY,
+      10 second timeout, retried once on timeout.
+    key_facts:
+      - "postgres"
+      - "ParcelPoint"
+      - "/v2/shipments"
+      - "bearer | CARRIER_API_KEY"
+      - "retr"
+    evidence:
+      - shop-api/app/services/carrier.py
+      - shop-api/app/db.py
+      - shop-api/app/config.py
+
+  - id: order-status-lifecycle
+    category: flow
+    question: What statuses can an order have and what moves it between them?
+    expected_answer: >-
+      New orders start 'pending' (column default). POST /orders/{id}/pay (the payment
+      webhook) moves pending -> paid; POST /orders/{id}/fulfill moves paid ->
+      fulfilled. 'cancelled' is allowed by the CHECK constraint but no endpoint sets it.
+    key_facts:
+      - "pending"
+      - "/pay | mark_order_paid"
+      - "/fulfill | fulfill_order"
+      - "cancelled"
+      - "no endpoint | never set | not set | nothing sets | unused"
+    evidence:
+      - shop-api/migrations/001_initial_schema.sql
+      - shop-api/app/routers/orders.py
+      - shop-api/app/routers/fulfillment.py
+
+  - id: lifetime-value-ui
+    category: frontend
+    question: Where does the "Lifetime value" shown in the web app come from?
+    expected_answer: >-
+      CustomerCard calls api.customerSummary -> GET /customers/{id}/summary and shows
+      lifetime_value formatted with formatMoney. React Query keeps it fresh for 30
+      seconds (staleTime) on top of the server's 60 second cache. The value is the sum
+      of total_cents of the customer's paid and fulfilled orders.
+    key_facts:
+      - "CustomerCard"
+      - "/summary | customerSummary"
+      - "30"
+      - "60"
+      - "total_cents | paid"
+    evidence:
+      - shop-web/src/components/CustomerCard.tsx
+      - shop-api/app/routers/customers.py
+
+  - id: frontend-endpoints
+    category: frontend
+    question: Which backend endpoints does the web app call?
+    expected_answer: >-
+      Via src/api/client.ts: GET /customers/{id}, GET /customers/{id}/summary,
+      GET /products, GET /orders?customer_id=..., POST /orders and
+      POST /orders/{id}/fulfill. It never calls POST /orders/{id}/pay or
+      GET /fulfillments/{id}.
+    key_facts:
+      - "/customers"
+      - "/summary"
+      - "/products"
+      - "/orders"
+      - "/fulfill"
+    evidence:
+      - shop-web/src/api/client.ts
+
+  - id: orders-list
+    category: data-source
+    question: Is the orders list endpoint cached, and how are results ordered and limited?
+    expected_answer: >-
+      No, it is not cached. GET /orders reads the orders table on every call, optionally filtered by
+      customer_id and status, ordered newest first (created_at DESC), limit 50 by
+      default and at most 200. The web app re-fetches it every 15 seconds.
+    key_facts:
+      - "not cached | no cache | isn't cached | is not cached | uncached"
+      - "created_at desc | newest"
+      - "50"
+      - "200"
+      - "15"
+    evidence:
+      - shop-api/app/routers/orders.py
+      - shop-web/src/components/OrderTable.tsx
+
+  - id: lifetime-value-definition
+    category: transformation
+    question: Exactly which orders count toward a customer's lifetime value, and does it include tax and shipping?
+    expected_answer: >-
+      Only orders with status 'paid' or 'fulfilled'; pending and cancelled orders are
+      excluded. It sums total_cents, so tax and shipping are included (after any gold
+      discount).
+    key_facts:
+      - "paid"
+      - "fulfilled"
+      - "total_cents"
+      - "pending | cancelled"
+      - "includes tax | including tax | tax and shipping are included | tax and shipping included"
+    evidence:
+      - shop-api/app/routers/customers.py
+      - shop-api/app/services/pricing.py
+
+  - id: overselling
+    category: flow
+    question: How does the backend stop two simultaneous orders from overselling the same product?
+    expected_answer: >-
+      create_order runs in one transaction and selects each product with SELECT ...
+      FOR UPDATE, so the row is locked until commit; it checks stock_quantity against
+      the requested quantity (409 if short) before decrementing it.
+    key_facts:
+      - "FOR UPDATE"
+      - "transaction"
+      - "stock_quantity"
+      - "409"
+    evidence:
+      - shop-api/app/routers/orders.py
+      - shop-api/app/db.py
+
+  - id: ui-estimate
+    category: frontend
+    question: Does the order form show the real order total before submitting?
+    expected_answer: >-
+      No. OrderForm shows only an estimate (price x quantity of selected products),
+      labelled "before tax and shipping". The gold discount, tax and shipping are
+      calculated by the server in price_order.
+    key_facts:
+      - "estimate"
+      - "tax"
+      - "shipping"
+      - "server | backend | price_order"
+    evidence:
+      - shop-web/src/components/OrderForm.tsx
+      - shop-api/app/services/pricing.py
+
+  - id: shipping-address
+    category: data-source
+    question: Where does the shipping address sent to the carrier come from?
+    expected_answer: >-
+      It is not the customer's address: fulfill_order passes the hard-coded
+      WAREHOUSE_ADDRESS placeholder (1 Depot Road, Austin, 78701) because addresses
+      are not stored in the database yet.
+    key_facts:
+      - "WAREHOUSE_ADDRESS"
+      - "1 Depot Road | Austin"
+      - "not stored | placeholder | hard-coded | hardcoded"
+    evidence:
+      - shop-api/app/routers/fulfillment.py
+
+  - id: configuration
+    category: config
+    question: What configuration do the two apps read from the environment?
+    expected_answer: >-
+      shop-api (app/config.py): DATABASE_URL, CARRIER_API_URL and CARRIER_API_KEY;
+      cache TTLs and the carrier timeout are constants. shop-web: VITE_API_URL
+      (defaults to http://localhost:8000).
+    key_facts:
+      - "DATABASE_URL"
+      - "CARRIER_API_URL"
+      - "CARRIER_API_KEY"
+      - "VITE_API_URL"
+    evidence:
+      - shop-api/app/config.py
+      - shop-web/src/api/client.ts
+
+  - id: orders-index
+    category: schema
+    question: What indexes exist on the orders table beyond the primary key, and what queries do they help?
+    expected_answer: >-
+      orders_customer_status_idx on (customer_id, status), added in
+      002_fulfillments.sql. It serves the customer summary query (customer_id + status
+      IN paid/fulfilled) and GET /orders filtered by customer and status.
+    key_facts:
+      - "orders_customer_status_idx"
+      - "customer_id"
+      - "status"
+      - "summary"
+    evidence:
+      - shop-api/migrations/002_fulfillments.sql
+      - shop-api/app/routers/customers.py

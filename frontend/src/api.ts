@@ -1,6 +1,9 @@
 /** Typed client for the backend API. Shapes mirror backend/src/repo_analyzer/api/schemas.py. */
 
 import { parseServerSentEvents } from "./sse";
+import { parseUsage, type Usage } from "./usage";
+
+export type { Usage } from "./usage";
 
 export interface Repository {
   name: string;
@@ -41,6 +44,7 @@ export type ChatEvent =
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   | { type: "sources"; sources: Source[] }
   | { type: "error"; message: string }
+  | { type: "usage"; usage: Usage }
   | { type: "done" };
 
 export class ApiError extends Error {
@@ -53,7 +57,7 @@ export class ApiError extends Error {
   }
 }
 
-async function toApiError(response: Response): Promise<ApiError> {
+export async function toApiError(response: Response): Promise<ApiError> {
   let detail = `Request failed (HTTP ${response.status})`;
   try {
     const body: unknown = await response.json();
@@ -70,13 +74,13 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(detail, response.status);
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) throw await toApiError(response);
   return (await response.json()) as T;
 }
 
-const JSON_HEADERS = { "Content-Type": "application/json" };
+export const JSON_HEADERS = { "Content-Type": "application/json" };
 
 export function getWorkspace(signal?: AbortSignal): Promise<Workspace> {
   return request<Workspace>("/api/workspace", { signal });
@@ -123,6 +127,9 @@ export async function* streamChat(
         break;
       case "error":
         yield { type: "error", message: String(payload.message ?? "Unknown error") };
+        break;
+      case "usage":
+        yield { type: "usage", usage: parseUsage(payload) };
         break;
       case "done":
         yield { type: "done" };

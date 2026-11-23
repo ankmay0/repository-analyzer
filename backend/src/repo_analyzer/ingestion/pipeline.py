@@ -13,10 +13,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import InvalidRepositorySourceError
 from repo_analyzer.ingestion.fetcher import RepoFetcher
+from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import (
     RepoIndex,
     RepoIndexStore,
@@ -31,6 +34,8 @@ from repo_analyzer.workspace import IndexedRepository, Workspace, WorkspaceState
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
+# Builds endpoint metadata for one repository from its index and checkout root.
+MetadataHook = Callable[[RepoIndex, Path], dict[str, Any]]
 
 
 class IndexingService:
@@ -40,11 +45,16 @@ class IndexingService:
         fetcher: RepoFetcher,
         index_store: RepoIndexStore,
         workspace: Workspace,
+        *,
+        metadata_hook: MetadataHook | None = None,
+        metadata_store: MetadataStore | None = None,
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher
         self._index_store = index_store
         self._workspace = workspace
+        self._metadata_hook = metadata_hook
+        self._metadata_store = metadata_store
 
     def validate(self, sources: Sequence[str]) -> None:
         """Reject a request that cannot succeed, before any cloning starts."""
@@ -102,6 +112,7 @@ class IndexingService:
         on_progress("Writing JSON indexes")
         for _, index in described:
             self._index_store.save(index)
+        self._write_metadata(described, on_progress)
 
         repositories = tuple(repository for repository, _ in described)
         state = WorkspaceState(repositories=repositories, indexed_at=indexed_at)
@@ -111,6 +122,26 @@ class IndexingService:
         for stale in previous.repositories:
             if stale.index_file not in kept:
                 self._index_store.delete(stale.index_file)
+                if self._metadata_store is not None:
+                    self._metadata_store.delete(stale.owner, stale.name)
 
         on_progress(f"Indexed {len(repositories)} repositories")
         return state
+
+    def _write_metadata(
+        self,
+        described: list[tuple[IndexedRepository, RepoIndex]],
+        on_progress: ProgressCallback,
+    ) -> None:
+        """Generate endpoint metadata if configured. A failure never fails indexing."""
+        if self._metadata_hook is None or self._metadata_store is None:
+            return
+        for repository, index in described:
+            on_progress(f"Describing endpoints in {repository.name}")
+            try:
+                metadata = self._metadata_hook(index, Path(repository.root))
+            except Exception as exc:  # model, network or parse failure: keep the index
+                logger.warning("Endpoint metadata for %s failed: %s", repository.name, exc)
+                self._metadata_store.delete(repository.owner, repository.name)
+                continue
+            self._metadata_store.save(metadata)

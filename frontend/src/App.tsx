@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, getWorkspace, startIndexing, type Workspace } from "./api";
+import { ComparePage } from "./compare/ComparePage";
 import { Chat } from "./components/Chat";
 import { RepositoryPanel } from "./components/RepositoryPanel";
 
 const POLL_INTERVAL_MS = 1500;
 
+type Tab = "chat" | "compare";
+
+const TAB_LABEL: Record<Tab, string> = { chat: "Chat", compare: "Compare" };
+
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("chat");
+  // Mount the Compare page on first visit, then keep it (and any run it follows) alive.
+  const [visited, setVisited] = useState<ReadonlySet<Tab>>(new Set(["chat"]));
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -44,20 +52,56 @@ export function App() {
     }
   }, []);
 
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    setVisited((current) => new Set(current).add(next));
+  };
+
   return (
-    <div className="layout">
-      <aside className="sidebar">
+    <div className="app">
+      <header className="topbar">
         <h1>Repository Analyzer</h1>
-        {error && (
-          <p className="notice notice-error" role="alert">
-            {error}
-          </p>
-        )}
-        <RepositoryPanel workspace={workspace} onIndex={handleIndex} />
-      </aside>
-      <main className="main">
-        <Chat workspace={workspace} />
-      </main>
+        <nav className="tabs" role="tablist" aria-label="Sections">
+          {(["chat", "compare"] as const).map((name) => (
+            <button
+              key={name}
+              type="button"
+              role="tab"
+              id={`tab-${name}`}
+              aria-selected={tab === name}
+              aria-controls={`panel-${name}`}
+              className={`tab${tab === name ? " tab-active" : ""}`}
+              onClick={() => selectTab(name)}
+            >
+              {TAB_LABEL[name]}
+            </button>
+          ))}
+        </nav>
+      </header>
+      <div className="layout" role="tabpanel" id="panel-chat" aria-labelledby="tab-chat" hidden={tab !== "chat"}>
+        <aside className="sidebar">
+          {error && (
+            <p className="notice notice-error" role="alert">
+              {error}
+            </p>
+          )}
+          <RepositoryPanel workspace={workspace} onIndex={handleIndex} />
+        </aside>
+        <main className="main">
+          <Chat workspace={workspace} />
+        </main>
+      </div>
+      {visited.has("compare") && (
+        <main
+          className="page-main"
+          role="tabpanel"
+          id="panel-compare"
+          aria-labelledby="tab-compare"
+          hidden={tab !== "compare"}
+        >
+          <ComparePage active={tab === "compare"} />
+        </main>
+      )}
     </div>
   );
 }

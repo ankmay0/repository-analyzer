@@ -216,6 +216,23 @@ npm install
 npm run dev                 # serves http://localhost:5173, proxies /api to the backend
 ```
 
+On Windows (PowerShell), install Universal Ctags first (`winget install UniversalCtags.Ctags`
+or `choco install universal-ctags`), then:
+
+```powershell
+cd backend
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,benchmark]"
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+python -m repo_analyzer     # serves http://127.0.0.1:8000
+
+# in a second PowerShell window
+cd frontend
+npm install
+npm run dev                 # http://localhost:5173
+```
+
 Open http://localhost:5173, press **Index repositories** (the form is pre-filled with
 `pallets/markupsafe`, `pallets/jinja` and `pallets/flask`), then ask a question. Indexing
 takes seconds and downloads nothing but the repositories. The JSON files appear in
@@ -241,6 +258,8 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
 | `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
 | `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
+| `RA_BENCHMARKS_DIR` | `<checkout>/benchmarks` | Where the compare API and the CLI benchmark find `questions.yaml` and `fixtures/` |
+| `RA_ENDPOINT_METADATA` | `false` | After indexing, ask the model once per repository for per-endpoint data-flow metadata and give the agent a `get_endpoint_metadata` tool |
 
 ### API
 
@@ -250,9 +269,43 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/skills` | Installed Agent Skills (name and description only) |
-| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `done` |
+| `GET /api/compare/status` | Repositories you can compare on (the benchmark fixtures and every indexed repository) and each approach as available or not, with the reason |
+| `POST /api/compare` | `{"question", "repository"?, "approaches"?}`: answers one question under every available approach at once, as one SSE stream. 503 without `ANTHROPIC_API_KEY`, 404 for an unknown repository |
+| `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `usage`, `done` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
+
+### Token usage per answer
+
+Every chat answer ends with a `usage` event just before `done`:
+
+```json
+{"input_tokens": 4400, "output_tokens": 95, "total_tokens": 4495,
+ "cache_read_tokens": 2400, "cache_creation_tokens": 1000,
+ "llm_calls": 3, "tool_calls": 2, "latency_ms": 5320}
+```
+
+Tokens are summed over every model call in the agent loop. `input_tokens` already
+includes prompt-cache reads and writes; the two `cache_*` fields show how much.
+`latency_ms` is wall-clock time for the whole answer. The same numbers are logged
+by `repo_analyzer.agent.service` as one `chat usage ...` line per answer (also
+attached to the log record as `chat_usage` for structured log handlers), and the
+chat UI shows them under each answer. If the client disconnects mid-answer, no
+usage event or log line is produced for that answer.
+
+## Benchmark
+
+`python -m repo_analyzer.benchmark` answers the known-answer questions in
+[`benchmarks/questions.yaml`](benchmarks/questions.yaml) about the fixture apps in
+`benchmarks/fixtures/`, under four approaches, and records correctness, tokens and
+latency. See [`benchmarks/README.md`](benchmarks/README.md).
+
+| Approach | What the agent gets |
+| --- | --- |
+| `chat` | The same agent as the Chat tab: Ctags JSON index, local file tools and skills |
+| `json-metadata` | Ctags JSON index + per-endpoint metadata written by the model at index time; no code access |
+| `tools-only` | No index: list, search and read the checkout |
+| `json-embeddings` | Ctags JSON index + top-k similar code chunks from a local embeddings store; no code access |
 
 ## Tests
 
@@ -296,3 +349,25 @@ frontmatter, the catalogue in the system prompt, and the `load_skill` tool.
   only after every repository has been fetched and scanned, so a failed run keeps the
   previous indexes, though checkouts fetched before the failure are already refreshed.
 - **Default branch only**, at the commit current when indexing ran.
+
+### Compare tab
+
+The **Compare** tab answers one free-form question under all four approaches at the
+same time and shows the answers side by side. Pick a repository (an indexed one, or the
+benchmark fixtures), type a question and press Compare. Each column streams its own
+answer, with a footer showing total, input, output and cached tokens, latency and tool
+calls; the column with the fewest tokens and the fastest one are marked. An approach
+that cannot run (for example `json-embeddings` without fastembed) appears greyed
+out with the reason. On narrow screens the columns stack. The
+questions asked in the session are listed underneath and can be reopened.
+
+`POST /api/compare` streams events that all carry `approach`, except `plan` (the
+approaches and whether each can run) and the final `done`: `setup`, `started`, `token`,
+`tool_call`, `error`, `unavailable`, then `usage` (input, output, cache tokens, latency,
+tool calls, plus the one-off setup tokens for endpoint metadata or embeddings the first
+time) and `approach_done`. The other three approaches share the benchmark's tools, prompts, metadata and
+embedding setup. The `chat` column is the Chat tab's agent (same builder, system
+prompt, skills and tools), pointed at the same local clone or fixtures. Metadata and embeddings are prepared once per
+repository and reused for the next question; for an indexed repository the agent only
+sees that repository. A compare run makes up to four agent runs for one question, so it
+costs about four times a chat answer.
