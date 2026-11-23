@@ -37,3 +37,11 @@ class WorkspaceEmptyError(AnalyzerError):
 
 class CtagsError(AnalyzerError):
     """Universal Ctags is missing, is not usable, or failed during indexing."""
+
+
+class BenchmarkUnavailableError(AnalyzerError):
+    """The benchmark questions or fixture apps are not on this machine."""
+
+
+class InvalidBenchmarkRequestError(AnalyzerError):
+    """A compare or benchmark request names something that does not exist or cannot run."""

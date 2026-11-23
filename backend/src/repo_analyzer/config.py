@@ -23,6 +23,12 @@ def default_skills_dir() -> Path:
     return here.parents[1] / "skills"  # backend/src/repo_analyzer -> backend/skills
 
 
+def default_benchmarks_dir() -> Path:
+    """``benchmarks/`` of a source checkout (questions and fixture apps), else under the cwd."""
+    checkout = Path(__file__).resolve().parents[3] / "benchmarks"
+    return checkout if checkout.is_dir() else Path.cwd() / "benchmarks"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RA_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -64,6 +70,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Endpoint metadata --------------------------------------------------------
+    endpoint_metadata: bool = Field(
+        default=False,
+        description=(
+            "After indexing, ask the model once per repository for per-endpoint data-flow "
+            "metadata (written next to the JSON index) and give the agent a tool to read it. "
+            "Costs one model call per repository per indexing run."
+        ),
+    )
+
+    # --- Benchmark -------------------------------------------------------------
+    benchmarks_dir: Path = Field(
+        default_factory=default_benchmarks_dir,
+        description="Directory with questions.yaml and fixtures/ for the benchmark API and CLI.",
+    )
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     llm_model: str = "claude-opus-5-5"
