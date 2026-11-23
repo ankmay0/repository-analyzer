@@ -28,13 +28,13 @@ export function CompareColumn({ column, fewestTokens, fastest }: Props) {
     <section
       className={`compare-column compare-${column.state}`}
       data-approach={column.name}
-      aria-label={`${column.name} answer`}
+      aria-label={`${column.label} answer`}
       aria-disabled={unavailable}
       aria-busy={busy}
     >
       <header>
         <h3>
-          <span className="approach-swatch" aria-hidden="true" /> {column.name}
+          <span className="approach-swatch" aria-hidden="true" /> {column.label}
         </h3>
         <span className="compare-state">{STATE_LABEL[column.state]}</span>
       </header>

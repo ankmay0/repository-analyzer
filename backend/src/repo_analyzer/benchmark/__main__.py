@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import subprocess
 import sys
 import tempfile
@@ -18,7 +17,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource
 from repo_analyzer.agent.llm import build_chat_model
 from repo_analyzer.benchmark.approaches import APPROACHES
 from repo_analyzer.benchmark.questions import load_questions
@@ -70,15 +68,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--top-k", type=int, default=8, help="Chunks given to json-embeddings")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
-    parser.add_argument(
-        "--github-repo", default="ankmay0/repository-analyzer",
-        help="owner/name holding the fixtures, for json-github",
-    )  # fmt: skip
-    parser.add_argument("--github-ref", default="main", help="Branch, tag or commit to read")
-    parser.add_argument(
-        "--github-root", default="benchmarks/fixtures",
-        help="Directory inside the GitHub repository that contains one folder per fixture",
-    )  # fmt: skip
     parser.add_argument("--dry-run", action="store_true", help="Check the setup; call no model")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -99,12 +88,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         questions = questions[: args.limit]
     approaches = args.approaches or list(APPROACHES)
 
-    token = os.environ.get("GITHUB_TOKEN") or None
-    github_owner, _, github_name = args.github_repo.partition("/")
-    sources = {
-        name: GitHubSource(github_owner, github_name, args.github_ref, f"{args.github_root}/{name}")
-        for name in question_set.repositories
-    }
     has_key = bool(settings.anthropic_api_key and settings.anthropic_api_key.get_secret_value())
 
     plan = {
@@ -112,7 +95,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "approaches": approaches,
         "fixtures": str(args.fixtures),
         "ANTHROPIC_API_KEY": "set" if has_key else "missing",
-        "GITHUB_TOKEN": "set" if token else "missing (json-github will be skipped)",
         "fastembed": "installed"
         if fastembed_available()
         else 'missing (json-embeddings will be skipped; pip install -e ".[embeddings]")',
@@ -160,10 +142,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         approaches=approaches,
         judge=args.judge,
         top_k=args.top_k,
-        github_client=GitHubClient(token=token, max_file_bytes=settings.max_file_bytes)
-        if token
-        else None,
-        github_sources=sources if token else None,
         embedder_factory=embedder if fastembed_available() else None,
     )
     try:
@@ -177,7 +155,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "effort": settings.llm_effort,
         "questions": len(questions),
         "commit": _git_commit(args.fixtures),
-        "github_ref": f"{args.github_repo}@{args.github_ref}" if token else None,
     }
     summary = write_report(result, out_dir, run_info)
     print(f"\nWrote {summary}")

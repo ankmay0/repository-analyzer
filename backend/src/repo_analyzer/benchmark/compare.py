@@ -9,15 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import secrets
 import threading
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource
 from repo_analyzer.benchmark.approaches import (
+    APPROACH_LABELS,
     APPROACH_SUMMARIES,
     APPROACHES,
     ApproachContext,
@@ -25,7 +24,7 @@ from repo_analyzer.benchmark.approaches import (
     build_approach,
     build_chat_service,
 )
-from repo_analyzer.benchmark.service import BenchmarkService, github_sources
+from repo_analyzer.benchmark.service import BenchmarkService
 from repo_analyzer.benchmark.setup import (
     ApproachSetup,
     SetupCost,
@@ -40,14 +39,12 @@ from repo_analyzer.errors import (
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.retrieval.embeddings import EmbeddingIndex
-from repo_analyzer.workspace import IndexedRepository, Workspace, WorkspaceState
+from repo_analyzer.workspace import Workspace, WorkspaceState
 
 logger = logging.getLogger(__name__)
 
 FIXTURES_ID = "benchmark-fixtures"
 FIXTURES_LABEL = "Benchmark fixtures (shop-api + shop-web)"
-NOT_ON_GITHUB = "this repository is not hosted on GitHub"
-_GITHUB_URL = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
 _END = object()
 
 
@@ -56,7 +53,6 @@ class CompareRequest:
     question: str
     repository: str = FIXTURES_ID
     approaches: list[str] | None = None
-    github_ref: str | None = None
 
 
 @dataclass(slots=True)
@@ -69,8 +65,6 @@ class CompareTarget:
     index_store: RepoIndexStore
     workspace: Workspace
     setup: ApproachSetup
-    github_sources: dict[str, GitHubSource] | None
-    github_reason: str | None
     metadata_store: MetadataStore | None = None
     embedding_index: EmbeddingIndex | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -90,14 +84,6 @@ class CompareTarget:
                 return self.embedding_index, None
             self.embedding_index, cost = self.setup.build_embeddings()
             return self.embedding_index, cost
-
-
-def _github_source_for(repository: IndexedRepository) -> GitHubSource | None:
-    match = _GITHUB_URL.match(repository.source.strip())
-    if match is None:
-        return None
-    ref = repository.commit or repository.default_branch or "HEAD"
-    return GitHubSource(match.group(1), match.group(2), ref, "")
 
 
 def _token_usage(cost: SetupCost | None) -> dict[str, Any] | None:
@@ -137,6 +123,7 @@ class CompareService:
             "approaches": [
                 {
                     "name": name,
+                    "label": APPROACH_LABELS[name],
                     "summary": APPROACH_SUMMARIES[name],
                     "available": (reason := self._benchmark.unavailable_reason(name)) is None,
                     "reason": reason,
@@ -164,13 +151,12 @@ class CompareService:
                     f"Unknown approach {name!r}; choose from {', '.join(APPROACHES)}"
                 )
         if request.repository == FIXTURES_ID:
-            return self._fixtures_target(request.github_ref)
+            return self._fixtures_target()
         return self._workspace_target(request.repository)
 
-    def _fixtures_target(self, github_ref: str | None) -> CompareTarget:
+    def _fixtures_target(self) -> CompareTarget:
         names = self._benchmark.fixture_repositories()
-        ref = github_ref or self._settings.benchmark_github_ref
-        key = f"fixtures@{ref}"
+        key = "fixtures"
         with self._targets_lock:
             target = self._targets.get(key)
             if target is not None:
@@ -186,23 +172,7 @@ class CompareService:
             index_fixture_repositories(
                 settings, index_store, workspace, settings.benchmarks_dir / "fixtures", names
             )
-            has_token = self._benchmark.unavailable_reason("json-github") is None
-            target = self._new_target(
-                key,
-                FIXTURES_LABEL,
-                settings,
-                index_store,
-                workspace,
-                github_sources(
-                    self._settings.benchmark_github_repo,
-                    ref,
-                    self._settings.benchmark_github_root,
-                    names,
-                )
-                if has_token
-                else None,
-                None,
-            )
+            target = self._new_target(key, FIXTURES_LABEL, settings, index_store, workspace)
             self._targets[key] = target
             return target
 
@@ -216,15 +186,12 @@ class CompareService:
             scoped = self._settings.data_dir / "compare" / "workspaces" / key.replace("/", "_")
             workspace = Workspace(scoped / "workspace.json")
             workspace.replace(WorkspaceState((repository,), self._workspace.state.indexed_at))
-            source = _github_source_for(repository)
             target = self._new_target(
                 key,
                 f"{repository.owner}/{repository.name}",
                 self._settings,
                 RepoIndexStore(self._settings.repos_dir),
                 workspace,
-                {repository.name: source} if source is not None else None,
-                NOT_ON_GITHUB if source is None else None,
             )
             self._targets[key] = target
             return target
@@ -236,8 +203,6 @@ class CompareService:
         settings: Settings,
         index_store: RepoIndexStore,
         workspace: Workspace,
-        sources: dict[str, GitHubSource] | None,
-        github_reason: str | None,
     ) -> CompareTarget:
         return CompareTarget(
             key=key,
@@ -252,8 +217,6 @@ class CompareService:
                 self._benchmark.make_model,
                 self._benchmark.embedder_factory(),
             ),
-            github_sources=sources,
-            github_reason=github_reason,
         )
 
     # --- streaming ----------------------------------------------------------------
@@ -262,11 +225,10 @@ class CompareService:
         rows = []
         for name in names:
             reason = self._benchmark.unavailable_reason(name)
-            if reason is None and name == "json-github":
-                reason = target.github_reason
             rows.append(
                 {
                     "name": name,
+                    "label": APPROACH_LABELS[name],
                     "summary": APPROACH_SUMMARIES[name],
                     "available": reason is None,
                     "reason": reason,
@@ -291,11 +253,10 @@ class CompareService:
             yield {"type": "done"}
             return
 
-        client = self._benchmark.github_client() if "json-github" in runnable else None
         queue: asyncio.Queue[Any] = asyncio.Queue()
         run_id = secrets.token_hex(4)
         tasks = [
-            asyncio.create_task(self._run_approach(name, target, request, client, run_id, queue))
+            asyncio.create_task(self._run_approach(name, target, request, run_id, queue))
             for name in runnable
         ]
         finished = 0
@@ -311,15 +272,12 @@ class CompareService:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            if client is not None:
-                client.close()
 
     async def _run_approach(
         self,
         name: str,
         target: CompareTarget,
         request: CompareRequest,
-        client: GitHubClient | None,
         run_id: str,
         queue: asyncio.Queue[Any],
     ) -> None:
@@ -331,8 +289,6 @@ class CompareService:
                 target.settings,
                 target.index_store,
                 target.workspace,
-                github_client=client,
-                github_sources=target.github_sources,
             )
             cost: SetupCost | None = None
             if name == "json-metadata":

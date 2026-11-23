@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { plan, usage } from "./fixtures";
+import { EMBEDDINGS_UNAVAILABLE, plan, usage } from "./fixtures";
 import {
   applyCompareEvent,
   emptyColumn,
@@ -25,10 +25,10 @@ const column = (run: CompareRun, name: string): ColumnView => run.columns.find((
 
 describe("applyCompareEvent", () => {
   it("starts unavailable approaches greyed out with their reason", () => {
-    const run = replay([plan()]);
-    expect(column(run, "json-github")).toMatchObject({
+    const run = replay([plan(EMBEDDINGS_UNAVAILABLE)]);
+    expect(column(run, "json-embeddings")).toMatchObject({
       state: "unavailable",
-      reason: "GITHUB_TOKEN is not set on the server",
+      reason: "fastembed is not installed",
     });
     expect(column(run, "tools-only").state).toBe("pending");
   });
@@ -78,10 +78,11 @@ describe("applyCompareEvent", () => {
   });
 
   it("closes open columns when the stream ends early", () => {
-    const run = finishRun(replay([plan(), { type: "token", approach: "tools-only", text: "x" }]), "The connection to the server was lost.");
+    const run = finishRun(replay([plan(EMBEDDINGS_UNAVAILABLE), { type: "token", approach: "tools-only", text: "x" }]), "The connection to the server was lost.");
     expect(run.finished).toBe(true);
     expect(column(run, "tools-only")).toMatchObject({ state: "error", error: "The connection to the server was lost." });
-    expect(column(run, "json-github").state).toBe("unavailable");
+    expect(column(run, "json-embeddings").state).toBe("unavailable");
+    expect(column(run, "chat")).toMatchObject({ state: "error", error: "The connection to the server was lost." });
   });
 });
 

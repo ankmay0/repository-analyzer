@@ -7,13 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
 from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer.agent.llm import build_chat_model
-from repo_analyzer.agent.service import ChatService
-from repo_analyzer.agent.skills import SkillLibrary, build_system_prompt
-from repo_analyzer.agent.tools import build_tools
+from repo_analyzer.agent.service import ChatService, build_chat_agent
+from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.benchmark.compare import CompareService
 from repo_analyzer.benchmark.service import BenchmarkService
 from repo_analyzer.config import Settings
@@ -42,7 +40,6 @@ def build_services(
     settings: Settings,
     *,
     model_factory: Callable[[], BaseChatModel] | None = None,
-    benchmark_github_transport: httpx.BaseTransport | None = None,
     benchmark_embedder_factory: Callable[[], Embedder] | None = None,
 ) -> Services:
     index_store = RepoIndexStore(settings.repos_dir)
@@ -69,19 +66,20 @@ def build_services(
         metadata_store=metadata_store,
     )
     skills = SkillLibrary.load(settings.skills_dir)
-    chat = ChatService(
+    chat = build_chat_agent(
+        settings,
+        index_store,
+        workspace,
         make_model,
-        build_tools(settings, index_store, workspace, skills, metadata_store),
-        recursion_limit=settings.agent_recursion_limit,
         # Scripted test models do not accept provider-specific call options.
         prompt_caching=model_factory is None,
-        system_prompt=build_system_prompt(skills),
+        skills=skills,
+        metadata_store=metadata_store,
     )
     benchmark = BenchmarkService(
         settings,
         make_model,
         needs_api_key=model_factory is None,
-        github_transport=benchmark_github_transport,
         embedder_factory=benchmark_embedder_factory,
     )
     return Services(

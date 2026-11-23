@@ -1,16 +1,17 @@
-"""The four approaches compared by the benchmark.
+"""The four approaches compared by the benchmark and the Compare tab.
 
-Every approach gets the same model, the same core rules and a fresh conversation
-per question; they differ only in what the agent can look at:
+Every approach gets the same model and a fresh conversation per question; they
+differ in what the agent can look at:
 
-``json-github``      Ctags JSON index + live repository access through the GitHub API
+``chat``             the Chat tab's agent (JSON index, local file tools, skills)
 ``json-metadata``    Ctags JSON index + LLM-written endpoint metadata, no repository access
 ``tools-only``       no index: list, search and read the local checkout
 ``json-embeddings``  Ctags JSON index + top-k code chunks from an embeddings store,
                      no repository access
 
-Skills are deliberately left out so that no approach gets extra instructions
-written for another approach's tools.
+The last three keep skills out of the prompt so they are not given instructions
+written for another approach's tools. ``chat`` uses the Chat tab's prompt and skills
+as-is.
 """
 
 from __future__ import annotations
@@ -21,8 +22,7 @@ from dataclasses import dataclass, field
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource, build_github_tools
-from repo_analyzer.agent.service import ChatService
+from repo_analyzer.agent.service import ChatService, chat_agent_tools_and_prompt
 from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.agent.tools import (
     build_list_files_tool,
@@ -39,11 +39,17 @@ from repo_analyzer.retrieval.embeddings import (
 )
 from repo_analyzer.workspace import Workspace
 
-APPROACHES = ("json-github", "json-metadata", "tools-only", "json-embeddings")
+APPROACHES = ("chat", "json-metadata", "tools-only", "json-embeddings")
 
-# Shown in the web UI next to each approach's checkbox.
+# Shown in the Compare tab: ``label`` is the column heading, ``summary`` the one-line description.
+APPROACH_LABELS = {
+    "chat": "Chat agent",
+    "json-metadata": "json-metadata",
+    "tools-only": "tools-only",
+    "json-embeddings": "json-embeddings",
+}
 APPROACH_SUMMARIES = {
-    "json-github": "Ctags JSON index + live read access to the repository through the GitHub API",
+    "chat": "The same agent as the Chat tab: JSON index, local file tools and skills",
     "json-metadata": "Ctags JSON index + per-endpoint metadata written once; no code access",
     "tools-only": "No index: the model lists, searches and reads files itself",
     "json-embeddings": "Ctags JSON index + the top-k most similar code chunks; no code access",
@@ -68,12 +74,6 @@ them. Keep answers as short as the question allows.
 """
 
 _INSTRUCTIONS = {
-    "json-github": """\
-Your tools: `list_repositories` and `get_repository_info` give each repository's Ctags \
-JSON index (file tree, declared dependencies, functions, classes and imports with line \
-numbers). `list_files`, `search_code` (exact text, not semantic) and `read_file` read the \
-live repository through the GitHub API. Use the index to find the relevant files and \
-symbols, then read the code to confirm before you answer.""",
     "json-metadata": """\
 You cannot read the source code. Your tools: `list_repositories` and \
 `get_repository_info` give each repository's Ctags JSON index (file tree, declared \
@@ -99,7 +99,7 @@ enough.""",
 
 
 class ApproachUnavailableError(Exception):
-    """A prerequisite (token, optional dependency) is missing; the approach is skipped."""
+    """A prerequisite (an optional dependency, for example) is missing; the approach is skipped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +116,6 @@ class ApproachContext:
     index_store: RepoIndexStore
     workspace: Workspace
     metadata_store: MetadataStore | None = None
-    github_client: GitHubClient | None = None
-    github_sources: dict[str, GitHubSource] | None = None
     embedding_index: EmbeddingIndex | None = None
     top_k: int = 8
 
@@ -129,6 +127,12 @@ def system_prompt_for(name: str) -> str:
 def build_approach(name: str, context: ApproachContext) -> Approach:
     if name not in APPROACHES:
         raise ValueError(f"Unknown approach {name!r}; choose from {', '.join(APPROACHES)}")
+    if name == "chat":
+        tools, prompt = chat_agent_tools_and_prompt(
+            context.settings, context.index_store, context.workspace
+        )
+        return Approach(name, tools, prompt)
+
     local = {
         t.name: t
         for t in build_tools(
@@ -140,12 +144,6 @@ def build_approach(name: str, context: ApproachContext) -> Approach:
     }
     index_tools = [local["list_repositories"], local["get_repository_info"]]
     prompt = system_prompt_for(name)
-
-    if name == "json-github":
-        if context.github_client is None or not context.github_sources:
-            raise ApproachUnavailableError("GITHUB_TOKEN is not set")
-        tools = index_tools + build_github_tools(context.github_client, context.github_sources)
-        return Approach(name, tools, prompt)
 
     if name == "json-metadata":
         if context.metadata_store is None:

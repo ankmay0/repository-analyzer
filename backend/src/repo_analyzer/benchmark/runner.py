@@ -10,7 +10,6 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource
 from repo_analyzer.agent.service import ChatService
 from repo_analyzer.agent.usage import UsageTracker
 from repo_analyzer.benchmark.approaches import (
@@ -78,8 +77,6 @@ class BenchmarkConfig:
     judge: bool = False
     top_k: int = 8
     prompt_caching: bool = True
-    github_client: GitHubClient | None = None
-    github_sources: dict[str, GitHubSource] | None = None
     embedder_factory: Callable[[], Embedder] | None = None
     # Called with {"type": ..., ...} as the run advances: approach_setup, approach_started,
     # approach_skipped, question_started and result. Used by the web UI for live progress.
@@ -124,8 +121,6 @@ class BenchmarkRunner:
             self._settings,
             self._index_store,
             self._workspace,
-            github_client=self._config.github_client,
-            github_sources=self._config.github_sources,
             top_k=self._config.top_k,
         )
         judge_usage = UsageTracker()
@@ -177,8 +172,6 @@ class BenchmarkRunner:
         if self._config.judge:
             judge_usage.finish()
             result.judge_usage = judge_usage.to_dict()
-        if self._config.github_client is not None:
-            self._config.github_client.close()
         return result
 
     async def _ask(

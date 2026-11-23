@@ -15,7 +15,7 @@
   --partial-bg: #fff3d1;
   --fail: #b3261e;
   --fail-bg: #fdecea;
-  --c-json-github: #2456c7;
+  --c-chat: #2456c7;
   --c-json-metadata: #8250df;
   --c-tools-only: #d97706;
   --c-json-embeddings: #0f8b8d;
@@ -41,7 +41,7 @@
     --partial-bg: #3a2c08;
     --fail: #ff8a80;
     --fail-bg: #3a1c1a;
-    --c-json-github: #7aa2ff;
+    --c-chat: #7aa2ff;
     --c-json-metadata: #b392f0;
     --c-tools-only: #f0a04b;
     --c-json-embeddings: #4fd1c5;
@@ -393,8 +393,8 @@ form > button {
   background: var(--muted);
 }
 
-[data-approach="json-github"] .approach-swatch {
-  background: var(--c-json-github);
+[data-approach="chat"] .approach-swatch {
+  background: var(--c-chat);
 }
 
 [data-approach="json-metadata"] .approach-swatch {
@@ -493,8 +493,8 @@ form > button {
   background: var(--bg);
 }
 
-.compare-column[data-approach="json-github"] {
-  border-top-color: var(--c-json-github);
+.compare-column[data-approach="chat"] {
+  border-top-color: var(--c-chat);
 }
 
 .compare-column[data-approach="json-metadata"] {

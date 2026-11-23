@@ -22,8 +22,14 @@ from langgraph.graph.state import CompiledStateGraph
 
 from repo_analyzer.agent.graph import AGENT_NODE, TOOLS_NODE, build_agent_graph
 from repo_analyzer.agent.prompts import SYSTEM_PROMPT
+from repo_analyzer.agent.skills import SkillLibrary, build_system_prompt
+from repo_analyzer.agent.tools import build_tools
 from repo_analyzer.agent.usage import UsageTracker
+from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.ingestion.metadata import MetadataStore
+from repo_analyzer.ingestion.repo_index import RepoIndexStore
+from repo_analyzer.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,14 @@ class ChatService:
         # not shared between workers. Swap in a durable checkpointer to change that.
         self._checkpointer = InMemorySaver()
         self._graph: CompiledStateGraph[Any, Any, Any, Any] | None = None
+
+    @property
+    def tools(self) -> list[BaseTool]:
+        return self._tools
+
+    @property
+    def system_prompt(self) -> str:
+        return self._system_prompt
 
     def ensure_ready(self) -> None:
         """Build the agent on first use. Raises ``LLMNotConfiguredError`` without a key."""
@@ -210,3 +224,49 @@ def _stop_reason_events(message: AIMessage) -> list[ChatEvent]:
             )
         ]
     return []
+
+
+def build_chat_agent(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    model_factory: Callable[[], BaseChatModel],
+    *,
+    prompt_caching: bool = True,
+    skills: SkillLibrary | None = None,
+    metadata_store: MetadataStore | None = None,
+) -> ChatService:
+    """The Chat tab's agent: same tools, skills and system prompt, pointed at ``workspace``.
+
+    When ``metadata_store`` is omitted and ``settings.endpoint_metadata`` is on, the
+    on-disk store next to the JSON indexes is used, matching the Chat tab.
+    """
+    tools, prompt = chat_agent_tools_and_prompt(
+        settings, index_store, workspace, skills=skills, metadata_store=metadata_store
+    )
+    return ChatService(
+        model_factory,
+        tools,
+        recursion_limit=settings.agent_recursion_limit,
+        prompt_caching=prompt_caching,
+        system_prompt=prompt,
+    )
+
+
+def chat_agent_tools_and_prompt(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    *,
+    skills: SkillLibrary | None = None,
+    metadata_store: MetadataStore | None = None,
+) -> tuple[list[BaseTool], str]:
+    """Tools and system prompt used by :func:`build_chat_agent` (and the Chat tab)."""
+    library = skills if skills is not None else SkillLibrary.load(settings.skills_dir)
+    store = metadata_store
+    if store is None and settings.endpoint_metadata:
+        store = MetadataStore(settings.repos_dir)
+    return (
+        build_tools(settings, index_store, workspace, library, store),
+        build_system_prompt(library),
+    )

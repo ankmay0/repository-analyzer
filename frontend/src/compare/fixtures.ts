@@ -4,10 +4,10 @@ import type { Usage } from "../usage";
 import type { CompareApproach, CompareEvent, CompareStatus } from "./types";
 
 export const APPROACHES: CompareApproach[] = [
-  { name: "json-github", summary: "Index + GitHub API", available: false, reason: "GITHUB_TOKEN is not set on the server" },
-  { name: "json-metadata", summary: "Index + metadata", available: true, reason: null },
-  { name: "tools-only", summary: "Just the tools", available: true, reason: null },
-  { name: "json-embeddings", summary: "Index + embeddings", available: true, reason: null },
+  { name: "chat", label: "Chat agent", summary: "The same agent as the Chat tab: JSON index, local file tools and skills", available: true, reason: null },
+  { name: "json-metadata", label: "json-metadata", summary: "Index + metadata", available: true, reason: null },
+  { name: "tools-only", label: "tools-only", summary: "Just the tools", available: true, reason: null },
+  { name: "json-embeddings", label: "json-embeddings", summary: "Index + embeddings", available: true, reason: null },
 ];
 
 export const STATUS: CompareStatus = {
@@ -35,12 +35,18 @@ export function usage(overrides: Partial<Usage> = {}): Usage {
   };
 }
 
-export function plan(): CompareEvent {
+export const EMBEDDINGS_UNAVAILABLE: CompareApproach[] = APPROACHES.map((approach) =>
+  approach.name === "json-embeddings"
+    ? { ...approach, available: false, reason: "fastembed is not installed" }
+    : approach,
+);
+
+export function plan(approaches: CompareApproach[] = APPROACHES): CompareEvent {
   return {
     type: "plan",
     question: "How is an order priced?",
     repository: "benchmark-fixtures",
     label: "Benchmark fixtures (shop-api + shop-web)",
-    approaches: APPROACHES,
+    approaches,
   };
 }

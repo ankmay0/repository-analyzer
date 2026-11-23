@@ -246,9 +246,7 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_MAX_FILE_BYTES` | `200000` | Larger files are not indexed, searched or readable |
 | `RA_CTAGS_PATH` | `ctags` | Path to the Universal Ctags binary. Indexing fails if it is missing. |
 | `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
-| `GITHUB_TOKEN` | — | Lets the benchmark's `json-github` approach read the fixtures through the GitHub API |
 | `RA_BENCHMARKS_DIR` | `<checkout>/benchmarks` | Where the compare API and the CLI benchmark find `questions.yaml` and `fixtures/` |
-| `RA_BENCHMARK_GITHUB_REF` | `main` | Branch, tag or commit `json-github` reads (also `RA_BENCHMARK_GITHUB_REPO`, `RA_BENCHMARK_GITHUB_ROOT`) |
 | `RA_ENDPOINT_METADATA` | `false` | After indexing, ask the model once per repository for per-endpoint data-flow metadata and give the agent a `get_endpoint_metadata` tool |
 
 ### API
@@ -292,7 +290,7 @@ latency. See [`benchmarks/README.md`](benchmarks/README.md).
 
 | Approach | What the agent gets |
 | --- | --- |
-| `json-github` | Ctags JSON index + live read access to the repository through the GitHub API (no clone) |
+| `chat` | The same agent as the Chat tab: Ctags JSON index, local file tools and skills |
 | `json-metadata` | Ctags JSON index + per-endpoint metadata written by the model at index time; no code access |
 | `tools-only` | No index: list, search and read the checkout |
 | `json-embeddings` | Ctags JSON index + top-k similar code chunks from a local embeddings store; no code access |
@@ -347,16 +345,17 @@ same time and shows the answers side by side. Pick a repository (an indexed one,
 benchmark fixtures), type a question and press Compare. Each column streams its own
 answer, with a footer showing total, input, output and cached tokens, latency and tool
 calls; the column with the fewest tokens and the fastest one are marked. An approach
-that cannot run (no `GITHUB_TOKEN`, no fastembed, or a repository that is not on
-GitHub) appears greyed out with the reason. On narrow screens the columns stack. The
+that cannot run (for example `json-embeddings` without fastembed) appears greyed
+out with the reason. On narrow screens the columns stack. The
 questions asked in the session are listed underneath and can be reopened.
 
 `POST /api/compare` streams events that all carry `approach`, except `plan` (the
 approaches and whether each can run) and the final `done`: `setup`, `started`, `token`,
 `tool_call`, `error`, `unavailable`, then `usage` (input, output, cache tokens, latency,
 tool calls, plus the one-off setup tokens for endpoint metadata or embeddings the first
-time) and `approach_done`. The approaches share the benchmark's code: the same tools,
-prompts, metadata and embedding setup. Metadata and embeddings are prepared once per
+time) and `approach_done`. The other three approaches share the benchmark's tools, prompts, metadata and
+embedding setup. The `chat` column is the Chat tab's agent (same builder, system
+prompt, skills and tools), pointed at the same local clone or fixtures. Metadata and embeddings are prepared once per
 repository and reused for the next question; for an indexed repository the agent only
 sees that repository. A compare run makes up to four agent runs for one question, so it
 costs about four times a chat answer.

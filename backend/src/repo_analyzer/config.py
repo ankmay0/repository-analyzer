@@ -85,20 +85,6 @@ class Settings(BaseSettings):
         default_factory=default_benchmarks_dir,
         description="Directory with questions.yaml and fixtures/ for the benchmark API and CLI.",
     )
-    github_token: SecretStr | None = Field(
-        default=None,
-        validation_alias="GITHUB_TOKEN",
-        description="Lets the json-github benchmark approach read the fixtures via the GitHub API.",
-    )
-    benchmark_github_repo: str = Field(
-        default="ankmay0/repository-analyzer",
-        description="owner/name that holds the benchmark fixtures, for json-github.",
-    )
-    benchmark_github_ref: str = Field(
-        default="main", description="Branch, tag or commit that json-github reads."
-    )
-    benchmark_github_root: str = "benchmarks/fixtures"
-
     # --- LLM ------------------------------------------------------------------
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     llm_model: str = "claude-opus-5-5"

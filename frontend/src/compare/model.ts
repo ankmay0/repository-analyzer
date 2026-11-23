@@ -7,6 +7,7 @@ export type ColumnState = "pending" | "preparing" | "streaming" | "done" | "erro
 
 export interface ColumnView {
   name: string;
+  label: string;
   summary: string;
   state: ColumnState;
   /** Why the approach cannot run (state "unavailable"). */
@@ -34,6 +35,7 @@ export interface CompareRun {
 export function emptyColumn(approach: CompareApproach): ColumnView {
   return {
     name: approach.name,
+    label: approach.label || approach.name,
     summary: approach.summary,
     state: approach.available ? "pending" : "unavailable",
     reason: approach.available ? null : approach.reason,

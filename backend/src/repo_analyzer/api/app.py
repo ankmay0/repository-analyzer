@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -49,7 +48,6 @@ def create_app(
     settings: Settings | None = None,
     *,
     model_factory: Callable[[], BaseChatModel] | None = None,
-    benchmark_github_transport: httpx.BaseTransport | None = None,
     benchmark_embedder_factory: Callable[[], Embedder] | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
@@ -57,7 +55,6 @@ def create_app(
     app.state.services = build_services(
         settings,
         model_factory=model_factory,
-        benchmark_github_transport=benchmark_github_transport,
         benchmark_embedder_factory=benchmark_embedder_factory,
     )
 

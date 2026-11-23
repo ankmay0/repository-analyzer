@@ -78,7 +78,7 @@ def summary_rows(result: BenchmarkResult) -> list[dict[str, Any]]:
 
 def render_markdown(result: BenchmarkResult, run_info: dict[str, Any]) -> str:
     lines = ["# Benchmark results", ""]
-    for key in ("started_at", "model", "questions", "commit", "github_ref"):
+    for key in ("started_at", "model", "questions", "commit"):
         if run_info.get(key) is not None:
             lines.append(f"- **{key.replace('_', ' ')}**: {run_info[key]}")
     lines += [

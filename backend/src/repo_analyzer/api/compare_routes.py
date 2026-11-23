@@ -28,11 +28,6 @@ class CompareIn(BaseModel):
     approaches: list[str] | None = Field(
         default=None, description="Subset of approaches; all four when omitted."
     )
-    github_ref: str | None = Field(
-        default=None,
-        max_length=200,
-        description="Branch, tag or commit json-github reads for the fixtures.",
-    )
 
 
 @router.get("/status")

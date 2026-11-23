@@ -4,6 +4,8 @@ import type { Usage } from "../usage";
 
 export interface CompareApproach {
   name: string;
+  /** Heading shown on the column (for example "Chat agent"). Defaults to the approach name. */
+  label?: string;
   summary: string;
   available: boolean;
   /** Why the approach cannot run (null when it can). */

@@ -1,18 +1,16 @@
 """Shared setup for the compare API and the CLI benchmark: credentials, fixtures, tools.
 
 This is not a web runner. Known-answer runs go through ``python -m repo_analyzer.benchmark``.
-The compare endpoint uses this to decide which approaches can run and to build GitHub
-clients, embedders and the fixture workspace.
+The compare endpoint uses this to decide which approaches can run and to build embedders
+and the fixture workspace.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
-import httpx
 from langchain_core.language_models import BaseChatModel
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource
 from repo_analyzer.benchmark.questions import QuestionSet, load_questions
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import BenchmarkUnavailableError, InvalidBenchmarkRequestError
@@ -23,14 +21,7 @@ from repo_analyzer.retrieval.embeddings import (
     fastembed_available,
 )
 
-GITHUB_TOKEN_MISSING = "GITHUB_TOKEN is not set on the server"  # noqa: S105 - a message
 NO_FASTEMBED = 'fastembed is not installed (pip install -e ".[embeddings]")'
-
-
-def github_sources(repo: str, ref: str, root: str, names: Sequence[str]) -> dict[str, GitHubSource]:
-    """Where each fixture app lives on GitHub (``<root>/<name>`` at ``ref``)."""
-    owner, _, name = repo.partition("/")
-    return {n: GitHubSource(owner, name, ref, f"{root}/{n}") for n in names}
 
 
 class BenchmarkService:
@@ -40,24 +31,17 @@ class BenchmarkService:
         model_factory: Callable[[], BaseChatModel],
         *,
         needs_api_key: bool = True,
-        github_transport: httpx.BaseTransport | None = None,
         embedder_factory: Callable[[], Embedder] | None = None,
     ) -> None:
         self._settings = settings
         self._model_factory = model_factory
         self._needs_api_key = needs_api_key
-        self._github_transport = github_transport
         self._embedder_factory = embedder_factory
 
     @property
     def llm_configured(self) -> bool:
         key = self._settings.anthropic_api_key
         return not self._needs_api_key or bool(key and key.get_secret_value())
-
-    @property
-    def _github_token(self) -> str | None:
-        token = self._settings.github_token
-        return token.get_secret_value() if token and token.get_secret_value() else None
 
     @property
     def settings(self) -> Settings:
@@ -70,17 +54,6 @@ class BenchmarkService:
 
     def make_model(self) -> BaseChatModel:
         return self._model_factory()
-
-    def github_client(self) -> GitHubClient | None:
-        """A new client for the fixtures' GitHub repository, or None without a token."""
-        token = self._github_token
-        if token is None:
-            return None
-        return GitHubClient(
-            token=token,
-            max_file_bytes=self._settings.max_file_bytes,
-            transport=self._github_transport,
-        )
 
     def embedder_factory(self) -> Callable[[], Embedder] | None:
         """How to build an embedder, or None when the embeddings extra is missing."""
@@ -96,8 +69,6 @@ class BenchmarkService:
         return FastEmbedEmbedder(DEFAULT_EMBEDDING_MODEL)
 
     def unavailable_reason(self, approach: str) -> str | None:
-        if approach == "json-github" and self._github_token is None:
-            return GITHUB_TOKEN_MISSING
         if (
             approach == "json-embeddings"
             and self._embedder_factory is None

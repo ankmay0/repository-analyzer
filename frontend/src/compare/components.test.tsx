@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { streamCompare } from "./api";
 import { CompareColumn } from "./CompareColumn";
 import { ComparePage } from "./ComparePage";
-import { plan, usage } from "./fixtures";
+import { EMBEDDINGS_UNAVAILABLE, plan, usage } from "./fixtures";
 import { applyCompareEvent, emptyColumn, newRun, type ColumnView } from "./model";
 import type { CompareEvent } from "./types";
 
@@ -39,10 +39,10 @@ describe("CompareColumn", () => {
   });
 
   it("greys out an unavailable approach, shows why, and has no usage footer", () => {
-    const out = html(emptyColumn({ name: "json-github", summary: "x", available: false, reason: "GITHUB_TOKEN is not set on the server" }));
+    const out = html(emptyColumn({ name: "json-embeddings", label: "json-embeddings", summary: "x", available: false, reason: "fastembed is not installed" }));
     expect(out).toContain("compare-unavailable");
     expect(out).toContain('aria-disabled="true"');
-    expect(out).toContain("Unavailable: GITHUB_TOKEN is not set on the server");
+    expect(out).toContain("Unavailable: fastembed is not installed");
     expect(out).not.toContain("compare-footer");
   });
 
@@ -61,7 +61,7 @@ describe("ComparePage", () => {
 
   it("shows past questions from this session and the latest result side by side", () => {
     const events: CompareEvent[] = [
-      plan(),
+      plan(EMBEDDINGS_UNAVAILABLE),
       { type: "token", approach: "tools-only", text: "Eight and a quarter percent." },
       { type: "usage", approach: "tools-only", usage: usage({ total_tokens: 9000, latency_ms: 9000 }), setup: null },
       { type: "approach_done", approach: "tools-only" },
@@ -81,7 +81,8 @@ describe("ComparePage", () => {
     expect(out).toContain("This session");
     expect(out).toContain("An earlier question");
     expect(out.match(/class="compare-column /g)).toHaveLength(4);
-    expect(out).toContain("Unavailable: GITHUB_TOKEN is not set on the server");
+    expect(out).toContain("Unavailable: fastembed is not installed");
+    expect(out).toContain("Chat agent");
     // json-metadata used fewer tokens and was faster than tools-only.
     expect(out.match(/Fewest tokens/g)).toHaveLength(1);
     expect(out.match(/Fastest/g)).toHaveLength(1);

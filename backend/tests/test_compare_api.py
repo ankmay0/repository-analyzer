@@ -13,14 +13,13 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
-from pydantic import SecretStr
 
 from repo_analyzer.api.app import create_app
 from repo_analyzer.benchmark import service as benchmark_service
 from repo_analyzer.benchmark.approaches import APPROACHES
 from repo_analyzer.benchmark.compare import FIXTURES_ID
 from repo_analyzer.config import Settings
-from support import FunctionChatModel, github_fixture_transport, tool_call, usage
+from support import FunctionChatModel, tool_call, usage
 from test_benchmark import BENCHMARKS
 from test_embeddings import KeywordEmbedder
 
@@ -53,13 +52,13 @@ def parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:
 QUESTION = "How does the shop decide what a customer pays?"
 # Distinct totals per approach so each column's usage can be told apart.
 INPUT_TOKENS = {
-    "json-github": 4000,
+    "chat": 4000,
     "json-metadata": 1500,
     "tools-only": 9000,
     "json-embeddings": 2500,
 }
 MARKERS = {
-    "through the GitHub API": "json-github",
+    "indexed for you": "chat",
     "You cannot read the source code": "json-metadata",
     "There is no index": "tools-only",
     "You cannot read files directly": "json-embeddings",
@@ -102,22 +101,12 @@ class Script:
         )
 
 
-def make_app(settings: Settings, script: Script, *, github: bool = True) -> FastAPI:
+def make_app(settings: Settings, script: Script, *, embedder: bool = True) -> FastAPI:
     model = FunctionChatModel(respond=script)
-    transport, _ = github_fixture_transport(
-        BENCHMARKS / "fixtures", owner="o", repo="r", ref="main", prefix="benchmarks/fixtures"
-    )
     return create_app(
         settings,
         model_factory=lambda: model,
-        benchmark_github_transport=transport,
-        benchmark_embedder_factory=KeywordEmbedder,
-    )
-
-
-def settings_with_github(tmp_path: Path) -> Settings:
-    return make_settings(
-        tmp_path, GITHUB_TOKEN="t", benchmark_github_repo="o/r", benchmark_github_ref="main"
+        benchmark_embedder_factory=KeywordEmbedder if embedder else None,
     )
 
 
@@ -137,7 +126,7 @@ async def ask(client: httpx.AsyncClient, **body: Any) -> list[tuple[str, dict[st
 
 @pytest.fixture
 async def client(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
-    async for http in client_for(make_app(settings_with_github(tmp_path), Script())):
+    async for http in client_for(make_app(make_settings(tmp_path), Script())):
         yield http
 
 
@@ -148,13 +137,14 @@ async def test_status_lists_the_fixtures_and_each_approach(client: httpx.AsyncCl
     assert [r["id"] for r in body["repositories"]] == [FIXTURES_ID]
     assert [a["name"] for a in body["approaches"]] == list(APPROACHES)
     assert all(a["available"] for a in body["approaches"])
+    assert body["approaches"][0]["name"] == "chat"
+    assert body["approaches"][0]["label"] == "Chat agent"
 
 
 async def test_status_explains_what_cannot_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(benchmark_service, "fastembed_available", lambda: False)
     async for http in client_for(create_app(make_settings(tmp_path))):
         body = (await http.get("/api/compare/status")).json()
@@ -162,9 +152,9 @@ async def test_status_explains_what_cannot_run(
 
     assert "ANTHROPIC_API_KEY" in body["llm_message"]
     reasons = {a["name"]: a["reason"] for a in body["approaches"]}
-    assert "GITHUB_TOKEN" in reasons["json-github"]
-    assert "fastembed" in reasons["json-embeddings"]
+    assert reasons["chat"] is None and reasons["json-metadata"] is None
     assert reasons["tools-only"] is None
+    assert "fastembed" in reasons["json-embeddings"]
     assert refused.status_code == 503
     assert "ANTHROPIC_API_KEY" in refused.json()["detail"]
 
@@ -178,6 +168,7 @@ async def test_every_approach_streams_its_answer_and_usage(client: httpx.AsyncCl
     plan = events[0][1]
     assert plan["question"] == QUESTION and plan["repository"] == FIXTURES_ID
     assert [a["name"] for a in plan["approaches"]] == list(APPROACHES)
+    assert plan["approaches"][0]["label"] == "Chat agent"
     assert all(a["available"] for a in plan["approaches"])
     assert set(grouped) == set(APPROACHES)
     for name in APPROACHES:
@@ -196,12 +187,12 @@ async def test_every_approach_streams_its_answer_and_usage(client: httpx.AsyncCl
     setup = {n: next(e for e in grouped[n] if e["type"] == "usage")["setup"] for n in APPROACHES}
     assert setup["json-metadata"]["total_tokens"] == 2 * 5300  # one model call per fixture app
     assert setup["json-embeddings"]["total_tokens"] == 0
-    assert setup["tools-only"] is None and setup["json-github"] is None
+    assert setup["tools-only"] is None and setup["chat"] is None
 
 
 async def test_setup_is_paid_once_and_reused_for_the_next_question(tmp_path: Path) -> None:
     script = Script()
-    async for http in client_for(make_app(settings_with_github(tmp_path), script)):
+    async for http in client_for(make_app(make_settings(tmp_path), script)):
         await ask(http)
         second = by_approach(await ask(http))
 
@@ -212,7 +203,7 @@ async def test_setup_is_paid_once_and_reused_for_the_next_question(tmp_path: Pat
 
 async def test_approaches_run_concurrently(tmp_path: Path) -> None:
     # All four first model calls must be waiting at once for the barrier to open.
-    async for http in client_for(make_app(settings_with_github(tmp_path), Script(rendezvous=4))):
+    async for http in client_for(make_app(make_settings(tmp_path), Script(rendezvous=4))):
         events = await ask(http)
 
     assert not any(data["type"] == "error" for _, data in events if "type" in data)
@@ -220,29 +211,31 @@ async def test_approaches_run_concurrently(tmp_path: Path) -> None:
 
 
 async def test_unavailable_approaches_are_reported_and_the_rest_still_run(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = make_app(make_settings(tmp_path), Script())  # no GITHUB_TOKEN
+    monkeypatch.setattr(benchmark_service, "fastembed_available", lambda: False)
+    app = make_app(make_settings(tmp_path), Script(), embedder=False)
     async for http in client_for(app):
         events = await ask(http)
 
     plan = {a["name"]: a for a in events[0][1]["approaches"]}
-    assert plan["json-github"]["available"] is False
-    assert "GITHUB_TOKEN" in plan["json-github"]["reason"]
+    assert plan["json-embeddings"]["available"] is False
+    assert "fastembed" in plan["json-embeddings"]["reason"]
+    assert plan["chat"]["available"] is True
     grouped = by_approach(events)
-    assert "json-github" not in grouped
-    assert set(grouped) == {"json-metadata", "tools-only", "json-embeddings"}
+    assert "json-embeddings" not in grouped
+    assert set(grouped) == {"chat", "json-metadata", "tools-only"}
 
 
 async def test_one_failing_approach_does_not_stop_the_others(tmp_path: Path) -> None:
-    app = make_app(settings_with_github(tmp_path), Script(fail="tools-only"))
+    app = make_app(make_settings(tmp_path), Script(fail="tools-only"))
     async for http in client_for(app):
         grouped = by_approach(await ask(http))
 
     errors = [e for e in grouped["tools-only"] if e["type"] == "error"]
     assert errors and "Unexpected server error" in errors[0]["message"]
     assert grouped["tools-only"][-1]["type"] == "approach_done"
-    for name in ("json-github", "json-metadata", "json-embeddings"):
+    for name in ("chat", "json-metadata", "json-embeddings"):
         assert any(e["type"] == "usage" for e in grouped[name])
 
 
@@ -258,19 +251,14 @@ async def test_an_indexed_repository_is_compared_in_isolation(
 ) -> None:
     names = sorted(fixture_repos)
     script = Script()
-    app = make_app(
-        settings.model_copy(update={"benchmarks_dir": BENCHMARKS, "github_token": SecretStr("t")}),
-        script,
-    )
+    app = make_app(settings.model_copy(update={"benchmarks_dir": BENCHMARKS}), script)
     async for http in client_for(app):
         status = (await http.get("/api/compare/status")).json()
         events = await ask(http, repository=names[0])
 
     assert {r["id"] for r in status["repositories"]} == {FIXTURES_ID, *names}
     plan = {a["name"]: a for a in events[0][1]["approaches"]}
-    assert plan["json-github"]["available"] is False
-    assert "not hosted on GitHub" in plan["json-github"]["reason"]
-    assert all(plan[n]["available"] for n in ("json-metadata", "tools-only", "json-embeddings"))
+    assert all(plan[n]["available"] for n in APPROACHES)
     grouped = by_approach(events)
     assert all(any(e["type"] == "usage" for e in grouped[n]) for n in grouped)
     # The agent only sees the chosen repository, not the rest of the workspace.

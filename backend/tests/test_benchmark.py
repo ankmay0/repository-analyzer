@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource
+from repo_analyzer.agent.service import build_chat_agent
 from repo_analyzer.benchmark import __main__ as cli
-from repo_analyzer.benchmark.approaches import APPROACHES
+from repo_analyzer.benchmark.approaches import APPROACHES, ApproachContext, build_approach
 from repo_analyzer.benchmark.grading import grade_key_facts, judge_answer
 from repo_analyzer.benchmark.questions import Question, load_questions
 from repo_analyzer.benchmark.report import write_report
 from repo_analyzer.benchmark.runner import BenchmarkConfig, BenchmarkRunner
 from repo_analyzer.config import Settings
-from support import FunctionChatModel, github_fixture_transport, tool_call, usage
+from support import FunctionChatModel, tool_call, usage
 from test_embeddings import KeywordEmbedder
 
 BENCHMARKS = Path(__file__).resolve().parents[2] / "benchmarks"
@@ -77,18 +77,6 @@ def fake_model(messages: list[BaseMessage]) -> AIMessage:
     return AIMessage(content=answer, usage_metadata=usage(1300, 120, cache_read=800))
 
 
-@pytest.fixture
-def github() -> tuple[GitHubClient, dict[str, GitHubSource]]:
-    transport, _ = github_fixture_transport(
-        BENCHMARKS / "fixtures", owner="o", repo="r", ref="main", prefix="benchmarks/fixtures"
-    )
-    sources = {
-        n: GitHubSource("o", "r", "main", f"benchmarks/fixtures/{n}")
-        for n in ("shop-api", "shop-web")
-    }
-    return GitHubClient(token="t", transport=transport), sources
-
-
 def config(tmp_path: Path, **overrides: object) -> BenchmarkConfig:
     values: dict[str, object] = {
         "settings": Settings(_env_file=None),
@@ -103,14 +91,9 @@ def config(tmp_path: Path, **overrides: object) -> BenchmarkConfig:
     return BenchmarkConfig(**values)  # type: ignore[arg-type]
 
 
-async def test_all_four_approaches_run_grade_and_report(
-    tmp_path: Path, github: tuple[GitHubClient, dict[str, GitHubSource]]
-) -> None:
+async def test_all_four_approaches_run_grade_and_report(tmp_path: Path) -> None:
     model = FunctionChatModel(respond=fake_model)
-    client, sources = github
-    runner = BenchmarkRunner(
-        config(tmp_path, judge=True, github_client=client, github_sources=sources), lambda: model
-    )
+    runner = BenchmarkRunner(config(tmp_path, judge=True), lambda: model)
 
     result = await runner.run()
 
@@ -139,8 +122,8 @@ async def test_all_four_approaches_run_grade_and_report(
                 and (
                     "`get_endpoint_metadata`" in system
                     if name == "json-metadata"
-                    else "GitHub API" in system
-                    if name == "json-github"
+                    else "indexed for you" in system
+                    if name == "chat"
                     else "There is no index" in system
                     if name == "tools-only"
                     else "`semantic_search`" in system
@@ -155,7 +138,7 @@ async def test_all_four_approaches_run_grade_and_report(
 
     summary = write_report(result, tmp_path / "out", {"model": "fake", "questions": 3})
     text = summary.read_text()
-    assert "| json-github | 3/3 | 100% | 3/3 | 2,470 (2,300 / 170) | 1.0 |" in text
+    assert "| chat | 3/3 | 100% | 3/3 | 2,470 (2,300 / 170) | 1.0 |" in text
     assert "| summary-data-source | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ |" in text
     rows = list(csv.DictReader((tmp_path / "out" / "results.csv").open()))
     assert len(rows) == 12 and rows[0]["total_tokens"] == "2470"
@@ -168,7 +151,7 @@ async def test_approaches_without_prerequisites_are_skipped_not_faked(tmp_path: 
     runner = BenchmarkRunner(
         config(
             tmp_path,
-            approaches=["json-github", "json-embeddings", "tools-only"],
+            approaches=["chat", "json-embeddings", "tools-only"],
             embedder_factory=None,
             questions=QUESTIONS.questions[:1],
         ),
@@ -177,13 +160,12 @@ async def test_approaches_without_prerequisites_are_skipped_not_faked(tmp_path: 
 
     result = await runner.run()
 
-    assert result.skipped == {
-        "json-github": "GITHUB_TOKEN is not set",
-        "json-embeddings": "no embedder configured",
-    }
-    assert [r.approach for r in result.results] == ["tools-only"]
+    assert result.skipped == {"json-embeddings": "no embedder configured"}
+    assert [r.approach for r in result.results] == ["chat", "tools-only"]
     text = write_report(result, tmp_path / "out", {}).read_text()
-    assert "| json-github | skipped: GITHUB_TOKEN is not set |" in text
+    assert "| json-embeddings | skipped: no embedder configured |" in text
+    chat_row = next(line for line in text.splitlines() if line.startswith("| chat |"))
+    assert "skipped" not in chat_row
 
 
 async def test_wrong_answers_are_graded_as_wrong(tmp_path: Path) -> None:
@@ -213,10 +195,32 @@ def test_cli_dry_run_indexes_the_fixtures_without_a_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.chdir(tmp_path)
     assert cli.main(["--dry-run"]) == 0
     printed = capsys.readouterr().out
     assert "questions: 19" in printed
-    assert "GITHUB_TOKEN: missing (json-github will be skipped)" in printed
+    assert "approaches:" in printed and "chat" in printed
+    assert "GITHUB_TOKEN" not in printed
     assert "indexed shop-api:" in printed and "indexed shop-web:" in printed
+
+
+def test_chat_approach_is_the_chat_tab_agent(settings: Settings, index_store, workspace) -> None:
+    """The compare/CLI chat approach must reuse the Chat tab's tools and prompt."""
+
+    def unused() -> None:
+        raise AssertionError("the model is not built while inspecting the agent")
+
+    tab = build_chat_agent(settings, index_store, workspace, unused, prompt_caching=False)
+    approach = build_approach("chat", ApproachContext(settings, index_store, workspace))
+
+    assert [t.name for t in approach.tools] == [t.name for t in tab.tools]
+    assert approach.system_prompt == tab.system_prompt
+    assert [t.name for t in approach.tools] == [
+        "list_repositories",
+        "get_repository_info",
+        "search_code",
+        "read_file",
+        "load_skill",
+    ]
+    assert "load_skill" in approach.system_prompt
+    assert "indexed for you" in approach.system_prompt
