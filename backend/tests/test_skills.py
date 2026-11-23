@@ -36,6 +36,7 @@ def test_shipped_skills_load_and_have_stable_names() -> None:
     assert library.names() == (
         "answer-with-citations",
         "dependency-review",
+        "draw-diagrams",
         "explain-architecture",
         "repo-navigation",
         "trace-feature",
@@ -204,3 +205,31 @@ def test_settings_honour_ra_skills_dir(tmp_path: Path, monkeypatch: pytest.Monke
     )
     settings = Settings(_env_file=None, skills_dir=tmp_path)
     assert SkillLibrary.load(settings.skills_dir).names() == ("custom-skill",)
+
+
+def test_diagram_guidance_prefers_mermaid_flowcharts_over_tables() -> None:
+    library = SkillLibrary.load(default_skills_dir())
+
+    diagrams = library.get("draw-diagrams")
+    assert diagrams is not None
+    assert "```mermaid" in diagrams.body
+    assert "flowchart" in diagrams.body
+    assert "table" in diagrams.body
+    for name in ("trace-feature", "explain-architecture"):
+        skill = library.get(name)
+        assert skill is not None
+        assert "draw-diagrams" in skill.body
+        assert "Mermaid flowchart" in skill.body
+
+    prompt = build_system_prompt(library)
+    assert "Mermaid flowchart" in prompt
+    assert "README-style table" in prompt
+    assert "- draw-diagrams: Draws Mermaid flowcharts" in prompt
+
+
+def test_example_diagram_in_the_skill_is_a_flowchart_block() -> None:
+    diagrams = SkillLibrary.load(default_skills_dir()).get("draw-diagrams")
+    assert diagrams is not None
+    block = diagrams.body.split("```mermaid\n", 1)[1].split("```", 1)[0]
+    assert block.startswith("flowchart ")
+    assert "-->" in block

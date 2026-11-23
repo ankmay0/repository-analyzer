@@ -1,8 +1,8 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
 
 import { ApiError, streamChat, type Repository, type Source, type Usage, type Workspace } from "../api";
 import { formatUsage } from "../usage";
+import { Answer } from "./Answer";
 
 interface ToolStep {
   name: string;
@@ -199,7 +199,7 @@ export function Chat({ workspace }: { workspace: Workspace | null }) {
 
             {turn.answer && (
               <div className="answer">
-                <Markdown>{turn.answer}</Markdown>
+                <Answer text={turn.answer} pending={turn.pending} />
               </div>
             )}
             {turn.pending && !turn.answer && <p className="muted">Working…</p>}

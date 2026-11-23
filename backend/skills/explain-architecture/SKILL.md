@@ -19,3 +19,6 @@ Load `repo-navigation` as well if you still need the tool details.
    citations. If symbols or imports are missing from the index (Ctags is
    incomplete for some languages), fall back to search and file reads rather
    than guessing.
+5. Show how the main parts connect as a small Mermaid flowchart (load
+   `draw-diagrams` for the conventions), then explain it in prose with
+   citations. Do not describe the architecture as a README-style table.
