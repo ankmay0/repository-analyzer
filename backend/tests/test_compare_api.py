@@ -22,8 +22,33 @@ from repo_analyzer.benchmark.compare import FIXTURES_ID
 from repo_analyzer.config import Settings
 from support import FunctionChatModel, github_fixture_transport, tool_call, usage
 from test_benchmark import BENCHMARKS
-from test_benchmark_api import client_for, make_settings, parse_sse
 from test_embeddings import KeywordEmbedder
+
+
+def make_settings(tmp_path: Path, **extra: Any) -> Settings:
+    return Settings(
+        _env_file=None,
+        data_dir=tmp_path / "data",
+        benchmarks_dir=BENCHMARKS,
+        **extra,
+    )
+
+
+async def client_for(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        yield http
+
+
+def parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:
+    events = []
+    for block in text.replace("\r\n", "\n").strip().split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.split("\n") if ": " in line)
+        if "event" in fields:
+            events.append((fields["event"], json.loads(fields["data"])))
+    return events
+
 
 QUESTION = "How does the shop decide what a customer pays?"
 # Distinct totals per approach so each column's usage can be told apart.

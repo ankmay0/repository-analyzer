@@ -44,12 +44,4 @@ class BenchmarkUnavailableError(AnalyzerError):
 
 
 class InvalidBenchmarkRequestError(AnalyzerError):
-    """A benchmark run request names something that does not exist or cannot run."""
-
-
-class BenchmarkRunInProgressError(AnalyzerError):
-    """Another benchmark run is still going; they are expensive, so only one runs at a time."""
-
-
-class UnknownBenchmarkRunError(AnalyzerError):
-    """No benchmark run has this id (runs are kept in memory for the life of the server)."""
+    """A compare or benchmark request names something that does not exist or cannot run."""

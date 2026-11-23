@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, getWorkspace, startIndexing, type Workspace } from "./api";
-import { BenchmarkPage } from "./benchmark/BenchmarkPage";
 import { ComparePage } from "./compare/ComparePage";
 import { Chat } from "./components/Chat";
 import { RepositoryPanel } from "./components/RepositoryPanel";
 
 const POLL_INTERVAL_MS = 1500;
 
-type Tab = "chat" | "compare" | "benchmark";
+type Tab = "chat" | "compare";
 
-const TAB_LABEL: Record<Tab, string> = { chat: "Chat", compare: "Compare", benchmark: "Benchmark" };
+const TAB_LABEL: Record<Tab, string> = { chat: "Chat", compare: "Compare" };
 
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
-  // Mount the benchmark page on first visit, then keep it (and any run it follows) alive.
+  // Mount the Compare page on first visit, then keep it (and any run it follows) alive.
   const [visited, setVisited] = useState<ReadonlySet<Tab>>(new Set(["chat"]));
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -63,7 +62,7 @@ export function App() {
       <header className="topbar">
         <h1>Repository Analyzer</h1>
         <nav className="tabs" role="tablist" aria-label="Sections">
-          {(["chat", "compare", "benchmark"] as const).map((name) => (
+          {(["chat", "compare"] as const).map((name) => (
             <button
               key={name}
               type="button"
@@ -94,24 +93,13 @@ export function App() {
       </div>
       {visited.has("compare") && (
         <main
-          className="benchmark-main"
+          className="page-main"
           role="tabpanel"
           id="panel-compare"
           aria-labelledby="tab-compare"
           hidden={tab !== "compare"}
         >
           <ComparePage active={tab === "compare"} />
-        </main>
-      )}
-      {visited.has("benchmark") && (
-        <main
-          className="benchmark-main"
-          role="tabpanel"
-          id="panel-benchmark"
-          aria-labelledby="tab-benchmark"
-          hidden={tab !== "benchmark"}
-        >
-          <BenchmarkPage />
         </main>
       )}
     </div>

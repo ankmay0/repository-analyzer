@@ -78,16 +78,18 @@ end with a fake model, a mock GitHub API and a keyword embedder
 ## From the web UI
 
 Start the backend and the frontend as usual (see the main README) and open the
-**Benchmark** tab. It needs the same things as the command line tool:
+**Compare** tab. Ask a free-form question about the fixture apps (or an indexed
+repository) and the four approaches answer side by side. It needs the same things
+as the command line tool:
 
-- `ANTHROPIC_API_KEY` in the backend environment, or the page shows an error and Run is
-  disabled;
-- `GITHUB_TOKEN` for `json-github` (set `RA_BENCHMARK_GITHUB_REF=<branch>` or type the ref
-  into the page until the fixtures are on `main`);
+- `ANTHROPIC_API_KEY` in the backend environment, or the page shows an error and Compare
+  is disabled;
+- `GITHUB_TOKEN` for `json-github` (set `RA_BENCHMARK_GITHUB_REF=<branch>` until the
+  fixtures are on `main`);
 - `pip install -e ".[embeddings]"` for `json-embeddings`.
 
-Approaches that are missing something are disabled in the page with the reason (the same
-information is at `GET /api/benchmark/status`). The backend must be started from a source
+Approaches that are missing something appear greyed out, with the reason (the same
+information is at `GET /api/compare/status`). The backend must be started from a source
 checkout, or with `RA_BENCHMARKS_DIR` pointing at a directory that holds `questions.yaml`
-and `fixtures/`. Tests for the endpoints use a fake model and need no key
-(`backend/tests/test_benchmark_api.py`).
+and `fixtures/`. Graded, known-answer runs of the question set still go through the
+command line tool (`python -m repo_analyzer.benchmark`).

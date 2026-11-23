@@ -116,7 +116,7 @@ export function ComparePage({ active }: { active: boolean }) {
 
   return (
     <div className="compare">
-      <div className="benchmark-intro">
+      <div className="page-intro">
         <h2>Compare approaches</h2>
         <p className="muted">
           Ask one question and see how each approach answers, side by side, with its token usage and latency.
