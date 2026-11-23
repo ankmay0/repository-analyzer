@@ -18,16 +18,14 @@ from repo_analyzer.benchmark.approaches import (
     ApproachContext,
     ApproachUnavailableError,
     build_approach,
+    build_chat_service,
 )
 from repo_analyzer.benchmark.grading import grade_key_facts, judge_answer
 from repo_analyzer.benchmark.questions import Question
+from repo_analyzer.benchmark.setup import ApproachSetup, SetupCost, index_fixture_repositories
 from repo_analyzer.config import Settings
-from repo_analyzer.ingestion.fetcher import RepoFetcher
-from repo_analyzer.ingestion.metadata import MetadataStore, generate_endpoint_metadata
-from repo_analyzer.ingestion.pipeline import IndexingService
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
-from repo_analyzer.ingestion.scanner import scan_repository
-from repo_analyzer.retrieval.embeddings import Embedder, EmbeddingIndex, chunk_files
+from repo_analyzer.retrieval.embeddings import Embedder
 from repo_analyzer.workspace import IndexedRepository, Workspace
 
 logger = logging.getLogger(__name__)
@@ -59,15 +57,6 @@ class QuestionResult:
     tools_used: list[str]
     error: str
     matched_facts: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class SetupCost:
-    """One-off work an approach needs before questions (metadata, embeddings)."""
-
-    approach: str
-    description: str
-    usage: dict[str, int]
 
 
 @dataclass(slots=True)
@@ -106,6 +95,13 @@ class BenchmarkRunner:
         )
         self._index_store = RepoIndexStore(self._settings.repos_dir)
         self._workspace = Workspace(self._settings.workspace_file)
+        self._setup = ApproachSetup(
+            self._settings,
+            self._index_store,
+            self._workspace,
+            model_factory,
+            config.embedder_factory,
+        )
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self._config.on_progress is not None:
@@ -113,62 +109,13 @@ class BenchmarkRunner:
 
     def index_fixtures(self) -> tuple[IndexedRepository, ...]:
         """Index the fixture repositories with Ctags into the work directory."""
-        fetcher = RepoFetcher(
-            self._settings.checkouts_dir,
-            allowed_hosts=self._settings.allowed_git_hosts,
-            allow_local_paths=True,
+        return index_fixture_repositories(
+            self._settings,
+            self._index_store,
+            self._workspace,
+            self._config.fixtures_dir,
+            self._config.repositories,
         )
-        service = IndexingService(self._settings, fetcher, self._index_store, self._workspace)
-        sources = [str(self._config.fixtures_dir / name) for name in self._config.repositories]
-        return service.run(sources).repositories
-
-    def _source_files(self, name: str) -> list[Any]:
-        repository = self._workspace.state.repository(name)
-        return list(
-            scan_repository(
-                name, Path(repository.root), max_file_bytes=self._settings.max_file_bytes
-            )
-        )
-
-    def _generate_metadata(self, result: BenchmarkResult) -> MetadataStore:
-        store = MetadataStore(self._settings.repos_dir)
-        usage = UsageTracker()
-        model = self._model_factory()
-        for repository in self._workspace.state.repositories:
-            index = self._index_store.load(repository.index_file)
-            metadata = generate_endpoint_metadata(
-                index, self._source_files(repository.name), model, usage=usage
-            )
-            store.save(metadata)
-        usage.finish()
-        result.setup.append(
-            SetupCost(
-                "json-metadata", "endpoint metadata, one model call per repository", usage.to_dict()
-            )
-        )
-        return store
-
-    def _build_embeddings(self, result: BenchmarkResult) -> EmbeddingIndex:
-        if self._config.embedder_factory is None:
-            raise ApproachUnavailableError("no embedder configured")
-        usage = UsageTracker()
-        embedder = self._config.embedder_factory()
-        chunks = [
-            chunk
-            for repository in self._workspace.state.repositories
-            for chunk in chunk_files(self._source_files(repository.name))
-        ]
-        index = EmbeddingIndex.build(embedder, chunks)
-        index.save(self._config.work_dir / "embeddings.json")
-        usage.finish()
-        result.setup.append(
-            SetupCost(
-                "json-embeddings",
-                f"embedded {len(chunks)} chunks with {embedder.name} (local, no LLM tokens)",
-                usage.to_dict(),
-            )
-        )
-        return index
 
     async def run(self) -> BenchmarkResult:
         result = BenchmarkResult()
@@ -188,9 +135,13 @@ class BenchmarkRunner:
                 if name in ("json-metadata", "json-embeddings"):
                     self._emit({"type": "approach_setup", "approach": name})
                 if name == "json-metadata":
-                    context.metadata_store = self._generate_metadata(result)
+                    context.metadata_store, cost = self._setup.generate_metadata()
+                    result.setup.append(cost)
                 if name == "json-embeddings":
-                    context.embedding_index = self._build_embeddings(result)
+                    context.embedding_index, cost = self._setup.build_embeddings(
+                        self._config.work_dir / "embeddings.json"
+                    )
+                    result.setup.append(cost)
                 approach = build_approach(name, context)
             except ApproachUnavailableError as exc:
                 logger.warning("Skipping %s: %s", name, exc)
@@ -199,12 +150,11 @@ class BenchmarkRunner:
                 continue
             self._emit({"type": "approach_started", "approach": name})
 
-            chat = ChatService(
+            chat = build_chat_service(
+                approach,
+                self._settings,
                 self._model_factory,
-                approach.tools,
-                recursion_limit=self._settings.agent_recursion_limit,
                 prompt_caching=self._config.prompt_caching,
-                system_prompt=approach.system_prompt,
             )
             for question in self._config.questions:
                 logger.info("[%s] %s", name, question.id)

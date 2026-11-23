@@ -15,6 +15,7 @@ from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer import __version__
 from repo_analyzer.api.benchmark_routes import router as benchmark_router
+from repo_analyzer.api.compare_routes import router as compare_router
 from repo_analyzer.api.routes import router
 from repo_analyzer.api.services import build_services
 from repo_analyzer.config import Settings
@@ -79,4 +80,5 @@ def create_app(
 
     app.include_router(router, prefix="/api")
     app.include_router(benchmark_router, prefix="/api/benchmark")
+    app.include_router(compare_router, prefix="/api/compare")
     return app

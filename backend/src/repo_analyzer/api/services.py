@@ -14,6 +14,7 @@ from repo_analyzer.agent.llm import build_chat_model
 from repo_analyzer.agent.service import ChatService
 from repo_analyzer.agent.skills import SkillLibrary, build_system_prompt
 from repo_analyzer.agent.tools import build_tools
+from repo_analyzer.benchmark.compare import CompareService
 from repo_analyzer.benchmark.service import BenchmarkService
 from repo_analyzer.config import Settings
 from repo_analyzer.ingestion.fetcher import RepoFetcher
@@ -34,6 +35,7 @@ class Services:
     chat: ChatService
     skills: SkillLibrary
     benchmark: BenchmarkService
+    compare: CompareService
 
 
 def build_services(
@@ -75,17 +77,19 @@ def build_services(
         prompt_caching=model_factory is None,
         system_prompt=build_system_prompt(skills),
     )
+    benchmark = BenchmarkService(
+        settings,
+        make_model,
+        needs_api_key=model_factory is None,
+        github_transport=benchmark_github_transport,
+        embedder_factory=benchmark_embedder_factory,
+    )
     return Services(
         settings=settings,
         workspace=workspace,
         jobs=IndexJobRunner(indexing),
         chat=chat,
         skills=skills,
-        benchmark=BenchmarkService(
-            settings,
-            make_model,
-            needs_api_key=model_factory is None,
-            github_transport=benchmark_github_transport,
-            embedder_factory=benchmark_embedder_factory,
-        ),
+        benchmark=benchmark,
+        compare=CompareService(benchmark, workspace),
     )

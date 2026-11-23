@@ -18,9 +18,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from repo_analyzer.agent.github_tools import GitHubClient, GitHubSource, build_github_tools
+from repo_analyzer.agent.service import ChatService
 from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.agent.tools import (
     build_list_files_tool,
@@ -180,4 +182,21 @@ def build_approach(name: str, context: ApproachContext) -> Approach:
         [*index_tools, build_semantic_search_tool(index, default_k=top_k)],
         prompt,
         with_chunks,
+    )
+
+
+def build_chat_service(
+    approach: Approach,
+    settings: Settings,
+    model_factory: Callable[[], BaseChatModel],
+    *,
+    prompt_caching: bool = True,
+) -> ChatService:
+    """A chat service that answers with one approach's tools and system prompt."""
+    return ChatService(
+        model_factory,
+        approach.tools,
+        recursion_limit=settings.agent_recursion_limit,
+        prompt_caching=prompt_caching,
+        system_prompt=approach.system_prompt,
     )

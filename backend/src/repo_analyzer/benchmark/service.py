@@ -30,8 +30,8 @@ from repo_analyzer.benchmark.runner import (
     BenchmarkResult,
     BenchmarkRunner,
     QuestionResult,
-    SetupCost,
 )
+from repo_analyzer.benchmark.setup import SetupCost
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import (
     AnalyzerError,
@@ -157,6 +157,37 @@ class BenchmarkService:
     def _github_token(self) -> str | None:
         token = self._settings.github_token
         return token.get_secret_value() if token and token.get_secret_value() else None
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
+    @property
+    def prompt_caching(self) -> bool:
+        """Scripted test models reject provider-specific cache options."""
+        return self._needs_api_key
+
+    def make_model(self) -> BaseChatModel:
+        return self._model_factory()
+
+    def github_client(self) -> GitHubClient | None:
+        """A new client for the fixtures' GitHub repository, or None without a token."""
+        token = self._github_token
+        if token is None:
+            return None
+        return GitHubClient(
+            token=token,
+            max_file_bytes=self._settings.max_file_bytes,
+            transport=self._github_transport,
+        )
+
+    def embedder_factory(self) -> Callable[[], Embedder] | None:
+        """How to build an embedder, or None when the embeddings extra is missing."""
+        return self._make_embedder if self.unavailable_reason("json-embeddings") is None else None
+
+    def fixture_repositories(self) -> list[str]:
+        """Fixture apps that exist on disk (from the questions file's repository list)."""
+        return self._select_repositories(self.question_set(), None)
 
     def _make_embedder(self) -> Embedder:
         if self._embedder_factory is not None:
@@ -378,13 +409,7 @@ class BenchmarkService:
             approaches=run.approaches,
             judge=run.judge,
             prompt_caching=self._needs_api_key,  # scripted test models reject cache options
-            github_client=GitHubClient(
-                token=token,
-                max_file_bytes=self._settings.max_file_bytes,
-                transport=self._github_transport,
-            )
-            if token
-            else None,
+            github_client=self.github_client(),
             github_sources=github_sources(
                 self._settings.benchmark_github_repo,
                 run.github_ref,
@@ -393,9 +418,7 @@ class BenchmarkService:
             )
             if token
             else None,
-            embedder_factory=self._make_embedder
-            if self.unavailable_reason("json-embeddings") is None
-            else None,
+            embedder_factory=self.embedder_factory(),
             on_progress=lambda event: self._publish(run, event),
         )
         # The runner is async only so it can stream the agent; give it its own event loop

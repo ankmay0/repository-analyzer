@@ -204,6 +204,23 @@ npm install
 npm run dev                 # serves http://localhost:5173, proxies /api to the backend
 ```
 
+On Windows (PowerShell), install Universal Ctags first (`winget install UniversalCtags.Ctags`
+or `choco install universal-ctags`), then:
+
+```powershell
+cd backend
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev,benchmark]"
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+python -m repo_analyzer     # serves http://127.0.0.1:8000
+
+# in a second PowerShell window
+cd frontend
+npm install
+npm run dev                 # http://localhost:5173
+```
+
 Open http://localhost:5173, press **Index repositories** (the form is pre-filled with
 `pallets/markupsafe`, `pallets/jinja` and `pallets/flask`), then ask a question. Indexing
 takes seconds and downloads nothing but the repositories. The JSON files appear in
@@ -242,6 +259,8 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/skills` | Installed Agent Skills (name and description only) |
+| `GET /api/compare/status` | Repositories you can compare on (the benchmark fixtures and every indexed repository) and each approach as available or not, with the reason |
+| `POST /api/compare` | `{"question", "repository"?, "approaches"?}`: answers one question under every available approach at once, as one SSE stream. 503 without `ANTHROPIC_API_KEY`, 404 for an unknown repository |
 | `GET /api/benchmark/status` | Whether a benchmark run can start, and each approach as available or unavailable (with the reason) |
 | `GET /api/benchmark/questions` | The known-answer questions, key facts and reference answers |
 | `POST /api/benchmark/runs` | `{"approaches": [...], "question_ids"?, "repositories"?, "judge"?, "github_ref"?}`: starts a run in the background (202); 503 without `ANTHROPIC_API_KEY`, 409 while another run is going |
@@ -340,3 +359,24 @@ charts summarise correctness, average tokens and average latency per approach, a
 run can go at a time, because each run makes many model calls. Runs are kept in memory
 (the page resumes a run after a reload) and each finished run is also written to
 `RA_DATA_DIR/benchmark/<run id>/` like the command line tool's results.
+
+### Compare tab
+
+The **Compare** tab answers one free-form question under all four approaches at the
+same time and shows the answers side by side. Pick a repository (an indexed one, or the
+benchmark fixtures), type a question and press Compare. Each column streams its own
+answer, with a footer showing total, input, output and cached tokens, latency and tool
+calls; the column with the fewest tokens and the fastest one are marked. An approach
+that cannot run (no `GITHUB_TOKEN`, no fastembed, or a repository that is not on
+GitHub) appears greyed out with the reason. On narrow screens the columns stack. The
+questions asked in the session are listed underneath and can be reopened.
+
+`POST /api/compare` streams events that all carry `approach`, except `plan` (the
+approaches and whether each can run) and the final `done`: `setup`, `started`, `token`,
+`tool_call`, `error`, `unavailable`, then `usage` (input, output, cache tokens, latency,
+tool calls, plus the one-off setup tokens for endpoint metadata or embeddings the first
+time) and `approach_done`. The approaches share the benchmark's code: the same tools,
+prompts, metadata and embedding setup. Metadata and embeddings are prepared once per
+repository and reused for the next question; for an indexed repository the agent only
+sees that repository. A compare run makes up to four agent runs for one question, so it
+costs about four times a chat answer.
