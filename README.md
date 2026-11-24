@@ -261,6 +261,13 @@ Open http://localhost:5173, press **Index repositories** (the form is pre-filled
 takes seconds and downloads nothing but the repositories. The JSON files appear in
 `backend/.data/repos/`.
 
+To trace a problem, start the backend with
+`python -m repo_analyzer --log-level debug --log-file .data/server.log`. The first lines
+show the settings in effect (secrets only as set/missing), including whether the code
+graph is enabled; Neo4j connection problems, per-repository graph syncs and one usage
+line per chat answer follow. See
+[backend/docs/architecture.md §13](backend/docs/architecture.md#13-running-locally).
+
 Optional code graph: start Neo4j 5 (for example
 `docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/your-password neo4j:5`),
 run `pip install -e ".[graph]"` in `backend`, set `RA_GRAPH_ENABLED=true` and

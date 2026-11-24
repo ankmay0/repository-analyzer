@@ -26,6 +26,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -341,6 +342,7 @@ class Neo4jGraphStore:
         self._write_timeout = write_timeout
         self._driver: Any = None
         self._schema_ready = False
+        self._reachable: bool | None = None  # last ping result, to log only changes
         self._lock = threading.Lock()
 
     @classmethod
@@ -361,6 +363,7 @@ class Neo4jGraphStore:
         with self._lock:
             if self._driver is None:
                 neo4j = self._neo4j()
+                logger.info("Neo4j driver %s connecting to %s", neo4j.__version__, self._uri)
                 self._driver = neo4j.GraphDatabase.driver(
                     self._uri,
                     auth=self._auth,
@@ -380,17 +383,29 @@ class Neo4jGraphStore:
             for statement in _SCHEMA:
                 session.run(statement)
         self._schema_ready = True
+        logger.info(
+            "Neo4j indexes ready (%d, database %r at %s)", len(_SCHEMA), self._database, self._uri
+        )
 
     def ping(self) -> bool:
         try:
             self._get_driver().verify_connectivity()
-        except Exception:  # missing extra, unreachable server, bad credentials
+        except Exception as exc:  # missing extra, unreachable server, bad credentials
+            if self._reachable is not False:  # log the reason once per outage, not every poll
+                logger.warning(
+                    "Neo4j is not available at %s: %s: %s", self._uri, type(exc).__name__, exc
+                )
+            self._reachable = False
             return False
+        if self._reachable is not True:
+            logger.info("Neo4j is reachable at %s", self._uri)
+        self._reachable = True
         return True
 
     def sync_repo(self, ws: str, repo: str, commit: str | None, records: GraphRecords) -> None:
         if not self._schema_ready:
             self.ensure_schema()
+        started = time.perf_counter()
         modules = {i.module: i.internal for i in records.imports}
         steps: list[tuple[str, list[Row]]] = [
             (_CREATE_FILES, [asdict(f) for f in records.files]),
@@ -419,6 +434,19 @@ class Neo4jGraphStore:
         neo4j = self._neo4j()
         with self._get_driver().session(database=self._database) as session:
             session.execute_write(neo4j.unit_of_work(timeout=self._write_timeout)(write))
+        logger.info(
+            "Neo4j: synced %s (ws=%s): %d files, %d functions, %d calls, %d endpoints, "
+            "%d tables, %d reads/writes in %d ms",
+            repo,
+            ws,
+            len(records.files),
+            len(records.functions),
+            len(records.calls),
+            len(records.endpoints),
+            len(records.tables),
+            len(records.accesses),
+            round((time.perf_counter() - started) * 1000),
+        )
 
     def delete_repo(self, ws: str, repo: str) -> None:
         def delete(tx: Any) -> None:
@@ -428,6 +456,7 @@ class Neo4jGraphStore:
         neo4j = self._neo4j()
         with self._get_driver().session(database=self._database) as session:
             session.execute_write(neo4j.unit_of_work(timeout=self._write_timeout)(delete))
+        logger.info("Neo4j: removed %s (ws=%s)", repo, ws)
 
     def endpoints(self, ws: str, repo: str) -> list[Row]:
         return self._read(_ENDPOINTS, ws=ws, repo=repo, limit=MAX_ENDPOINTS)

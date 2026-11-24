@@ -111,11 +111,18 @@ def test_unknown_endpoint_has_no_trace() -> None:
     assert shop_store().trace_endpoint("other-ws", "shop-api", "POST", "/orders") is None
 
 
-def test_neo4j_store_reports_unreachable_without_raising() -> None:
+def test_neo4j_store_reports_unreachable_without_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = Neo4jGraphStore("bolt://127.0.0.1:1", "neo4j", "x", "neo4j")
 
     assert store.ping() is False
+    assert store.ping() is False
     store.close()
+
+    reasons = [r for r in caplog.records if "Neo4j is not available" in r.getMessage()]
+    assert len(reasons) == 1  # the reason is logged once per outage, not on every health poll
+    assert "bolt://127.0.0.1:1" in reasons[0].getMessage()
 
 
 @pytest.mark.skipif(

@@ -152,7 +152,14 @@ class IndexingService:
                 try:
                     store.delete_repo(self._graph_ws, stale.name)
                 except Exception as exc:  # Neo4j down, driver missing, ...
-                    logger.warning("Removing %s from the code graph failed: %s", stale.name, exc)
+                    logger.warning(
+                        "Removing %s from the code graph failed: %s: %s",
+                        stale.name,
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
+        synced: list[str] = []
         for repository in repositories:
             try:
                 records = extract_graph(
@@ -162,9 +169,31 @@ class IndexingService:
                         max_file_bytes=self._settings.max_file_bytes,
                     )
                 )
+                logger.debug(
+                    "Code graph for %s: %d functions, %d calls, %d endpoints, %d tables",
+                    repository.name,
+                    len(records.functions),
+                    len(records.calls),
+                    len(records.endpoints),
+                    len(records.tables),
+                )
                 store.sync_repo(self._graph_ws, repository.name, repository.commit, records)
+                synced.append(repository.name)
             except Exception as exc:  # the JSON index is already written: keep it
-                logger.warning("Code graph for %s failed: %s", repository.name, exc)
+                logger.warning(
+                    "Code graph for %s failed: %s: %s",
+                    repository.name,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+        logger.info(
+            "Code graph: %d of %d repositories synced (ws=%s)%s",
+            len(synced),
+            len(repositories),
+            self._graph_ws,
+            "" if len(synced) == len(repositories) else "; see the warnings above",
+        )
 
     def _write_metadata(
         self,

@@ -280,3 +280,23 @@ async def test_an_injected_graph_store_is_ignored_while_the_graph_is_disabled(
 
     assert app.state.services.graph_store is None
     assert store.repos == {} and store.schema_calls == 0
+
+
+def test_startup_log_summarises_settings_without_secrets(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
+    monkeypatch.setenv("NEO4J_PASSWORD", "neo4j-secret-value")
+    caplog.set_level("INFO", logger="repo_analyzer")
+
+    create_app(Settings(_env_file=None, data_dir=settings.data_dir))
+    create_app(
+        Settings(_env_file=None, data_dir=settings.data_dir, graph_enabled=True),
+        graph_store=FakeGraphStore(),
+    )
+
+    assert "ANTHROPIC_API_KEY=set" in caplog.text
+    assert "Code graph: disabled" in caplog.text
+    assert "Code graph: enabled uri=bolt://localhost:7687" in caplog.text
+    assert "NEO4J_PASSWORD=set" in caplog.text
+    assert "secret-value" not in caplog.text

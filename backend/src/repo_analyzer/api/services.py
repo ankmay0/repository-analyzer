@@ -42,6 +42,39 @@ class Services:
     graph_ws: str = ""
 
 
+def _is_set(secret: Any) -> str:
+    """``set`` / ``missing`` for a SecretStr; never the value."""
+    return "set" if secret is not None and secret.get_secret_value() else "missing"
+
+
+def _log_startup(settings: Settings, skills: SkillLibrary, graph_ws: str) -> None:
+    """One summary of the effective configuration, so a log shows what the server runs with."""
+    logger.info(
+        "Starting: data_dir=%s ctags=%s skills=%d (%s) model=%s effort=%s ANTHROPIC_API_KEY=%s "
+        "allow_local_paths=%s endpoint_metadata=%s",
+        settings.data_dir.resolve(),
+        settings.ctags_path,
+        len(skills.names()),
+        settings.skills_dir,
+        settings.llm_model,
+        settings.llm_effort,
+        _is_set(settings.anthropic_api_key),
+        settings.allow_local_paths,
+        settings.endpoint_metadata,
+    )
+    if settings.graph_enabled:
+        logger.info(
+            "Code graph: enabled uri=%s user=%s database=%s NEO4J_PASSWORD=%s ws=%s",
+            settings.neo4j_uri,
+            settings.neo4j_user,
+            settings.neo4j_database,
+            _is_set(settings.neo4j_password),
+            graph_ws,
+        )
+    else:
+        logger.info("Code graph: disabled (set RA_GRAPH_ENABLED=true to enable)")
+
+
 def _build_graph_store(settings: Settings, injected: GraphStore | None) -> GraphStore | None:
     """The Neo4j store when the graph is enabled; ``None`` keeps today's behaviour."""
     if not settings.graph_enabled:
@@ -50,7 +83,11 @@ def _build_graph_store(settings: Settings, injected: GraphStore | None) -> Graph
     try:
         store.ensure_schema()
     except Exception as exc:  # Neo4j down or the extra missing: retried on first sync
-        logger.warning("Code graph schema setup failed (will retry when indexing): %s", exc)
+        logger.warning(
+            "Code graph schema setup failed (will retry when indexing): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
     return store
 
 
@@ -76,8 +113,10 @@ def build_services(
         files = scan_repository(index["name"], root, max_file_bytes=settings.max_file_bytes)
         return generate_endpoint_metadata(index, files, make_model())
 
-    graph = _build_graph_store(settings, graph_store)
+    skills = SkillLibrary.load(settings.skills_dir)
     graph_ws = graph_workspace_key(settings.data_dir)
+    _log_startup(settings, skills, graph_ws)
+    graph = _build_graph_store(settings, graph_store)
     indexing = IndexingService(
         settings,
         fetcher,
@@ -88,7 +127,6 @@ def build_services(
         graph_store=graph,
         graph_ws=graph_ws,
     )
-    skills = SkillLibrary.load(settings.skills_dir)
     chat = build_chat_agent(
         settings,
         index_store,

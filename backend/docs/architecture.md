@@ -573,6 +573,23 @@ Windows pitfalls:
 Check it: http://127.0.0.1:8000/api/health should show `llm_configured: true` and
 `ctags_available: true`; http://127.0.0.1:8000/docs is the interactive API.
 
+**Logging.** `python -m repo_analyzer --log-level debug --log-file .data/server.log`
+writes one format (`time LEVEL [thread] logger: message`) to the console and, with
+`--log-file`, also to a file; uvicorn's server and access lines share it. What to look for:
+
+| Line | Tells you |
+| --- | --- |
+| `Starting: data_dir=… ANTHROPIC_API_KEY=set …` (or `missing`) | The settings actually in effect (secrets only as set/missing) |
+| `Code graph: enabled uri=… NEO4J_PASSWORD=set ws=…` / `Code graph: disabled` | Whether `RA_GRAPH_ENABLED` was picked up from `.env` |
+| `Neo4j indexes ready` / `Code graph schema setup failed …` | Startup connection to Neo4j |
+| `Neo4j is not available at …: <Error>: <reason>` | Why `/api/health` says `graph_available: false` (logged once per outage) |
+| `[i/n] Fetching …`, `Building code graph`, `Indexed n repositories` | Indexing progress (worker thread) |
+| `Neo4j: synced <repo> …: n files, n functions, n calls … in n ms` | Per-repo graph sync; failures log a warning with the traceback |
+| `Code graph: k of n repositories synced` | Summary per indexing run |
+| `chat usage thread=… input=… output=… latency_ms=…` | One line per chat answer |
+
+The Neo4j driver, `httpcore` and `urllib3` are held at WARNING so `debug` stays readable.
+
 Frontend (second terminal): `cd frontend && npm install && npm run dev` →
 http://localhost:5173.
 
