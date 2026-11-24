@@ -1,5 +1,4 @@
-import Markdown from "react-markdown";
-
+import { Answer } from "../components/Answer";
 import { formatLatency } from "../usage";
 import type { ColumnView } from "./model";
 
@@ -44,7 +43,7 @@ export function CompareColumn({ column, fewestTokens, fastest }: Props) {
         {unavailable && <p className="approach-reason">Unavailable: {column.reason}</p>}
         {column.state === "preparing" && <p className="muted spinner">{column.setupMessage ?? "Preparing"}…</p>}
         {column.state === "pending" && <p className="muted">Waiting for the answer…</p>}
-        {column.text && <Markdown>{column.text}</Markdown>}
+        {column.text && <Answer text={column.text} pending={column.state === "streaming"} />}
         {column.state === "streaming" && !column.text && <p className="muted spinner">Thinking…</p>}
         {column.error && (
           <p className="notice notice-error" role="alert">

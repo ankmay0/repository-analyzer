@@ -22,8 +22,8 @@ interface Turn {
 
 const EXAMPLE_QUESTIONS = [
   "What does each repository declare as its dependencies?",
-  "Which flask modules import from jinja2?",
-  "Where does flask configure the Jinja environment?",
+  "What does POST /orders call, and which tables does it read or write?",
+  "Draw an architecture diagram of how a request flows from the API to the database.",
 ];
 
 function newThreadId(): string {
