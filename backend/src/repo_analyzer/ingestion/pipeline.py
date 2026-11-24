@@ -19,6 +19,8 @@ from typing import Any
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import InvalidRepositorySourceError
 from repo_analyzer.ingestion.fetcher import RepoFetcher
+from repo_analyzer.ingestion.graph_extract import extract_graph
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import (
     RepoIndex,
@@ -48,6 +50,8 @@ class IndexingService:
         *,
         metadata_hook: MetadataHook | None = None,
         metadata_store: MetadataStore | None = None,
+        graph_store: GraphStore | None = None,
+        graph_ws: str = "",
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher
@@ -55,6 +59,8 @@ class IndexingService:
         self._workspace = workspace
         self._metadata_hook = metadata_hook
         self._metadata_store = metadata_store
+        self._graph_store = graph_store
+        self._graph_ws = graph_ws
 
     def validate(self, sources: Sequence[str]) -> None:
         """Reject a request that cannot succeed, before any cloning starts."""
@@ -124,9 +130,41 @@ class IndexingService:
                 self._index_store.delete(stale.index_file)
                 if self._metadata_store is not None:
                     self._metadata_store.delete(stale.owner, stale.name)
+        self._sync_graph(repositories, previous, on_progress)
 
         on_progress(f"Indexed {len(repositories)} repositories")
         return state
+
+    def _sync_graph(
+        self,
+        repositories: tuple[IndexedRepository, ...],
+        previous: WorkspaceState,
+        on_progress: ProgressCallback,
+    ) -> None:
+        """Rebuild each repository's code graph. A failure never fails indexing."""
+        store = self._graph_store
+        if store is None:
+            return
+        on_progress("Building code graph")
+        kept = {repository.name for repository in repositories}
+        for stale in previous.repositories:
+            if stale.name not in kept:
+                try:
+                    store.delete_repo(self._graph_ws, stale.name)
+                except Exception as exc:  # Neo4j down, driver missing, ...
+                    logger.warning("Removing %s from the code graph failed: %s", stale.name, exc)
+        for repository in repositories:
+            try:
+                records = extract_graph(
+                    scan_repository(
+                        repository.name,
+                        Path(repository.root),
+                        max_file_bytes=self._settings.max_file_bytes,
+                    )
+                )
+                store.sync_repo(self._graph_ws, repository.name, repository.commit, records)
+            except Exception as exc:  # the JSON index is already written: keep it
+                logger.warning("Code graph for %s failed: %s", repository.name, exc)
 
     def _write_metadata(
         self,

@@ -1,11 +1,13 @@
 """FastAPI application factory.
 
-Tests call ``create_app`` with their own settings and a scripted chat model.
+Tests call ``create_app`` with their own settings, a scripted chat model and, for the
+code graph, an in-memory ``GraphStore``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +23,7 @@ from repo_analyzer.errors import (
     AnalyzerError,
     BenchmarkUnavailableError,
     CtagsError,
+    GraphUnavailableError,
     IndexingInProgressError,
     InvalidBenchmarkRequestError,
     InvalidRepositorySourceError,
@@ -29,9 +32,11 @@ from repo_analyzer.errors import (
     UnknownRepositoryError,
     WorkspaceEmptyError,
 )
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.retrieval.embeddings import Embedder
 
 _STATUS_BY_ERROR: dict[type[AnalyzerError], int] = {
+    GraphUnavailableError: 503,
     InvalidRepositorySourceError: 400,
     UnknownRepositoryError: 404,
     IndexingInProgressError: 409,
@@ -49,13 +54,23 @@ def create_app(
     *,
     model_factory: Callable[[], BaseChatModel] | None = None,
     benchmark_embedder_factory: Callable[[], Embedder] | None = None,
+    graph_store: GraphStore | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
-    app = FastAPI(title="Repository Analyzer", version=__version__)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        store = app.state.services.graph_store
+        if store is not None:
+            store.close()
+
+    app = FastAPI(title="Repository Analyzer", version=__version__, lifespan=lifespan)
     app.state.services = build_services(
         settings,
         model_factory=model_factory,
         benchmark_embedder_factory=benchmark_embedder_factory,
+        graph_store=graph_store,
     )
 
     app.add_middleware(

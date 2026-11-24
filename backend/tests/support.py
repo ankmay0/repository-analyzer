@@ -7,7 +7,9 @@ Each fixture repository is a tiny Python project; ``mid-lib`` declares a depende
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from collections.abc import Callable, Iterator
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+
+from repo_analyzer.ingestion.graph_extract import GraphRecords
+from repo_analyzer.ingestion.graph_store import (
+    MAX_TRACE_DEPTH,
+    Trace,
+    assemble_trace,
+    match_endpoint,
+)
 
 FIXTURE_REPOS: dict[str, dict[str, str]] = {
     "core-lib": {
@@ -168,3 +178,98 @@ class FunctionChatModel(ScriptedChatModel):
     def _next(self, messages: list[BaseMessage]) -> AIMessage:
         self.calls.append(list(messages))
         return self.respond(messages)
+
+
+class FakeGraphStore:
+    """In-memory ``GraphStore`` for tests: same API as the Neo4j store, no database.
+
+    Traces are built from the stored records with the same ``assemble_trace`` the Neo4j
+    store uses, so tests exercise the real ordering and formatting rules.
+    """
+
+    def __init__(self, *, fail: bool = False, reachable: bool = True) -> None:
+        self.repos: dict[tuple[str, str], GraphRecords] = {}
+        self.commits: dict[tuple[str, str], str | None] = {}
+        self.deleted: list[tuple[str, str]] = []
+        self.fail = fail
+        self.reachable = reachable
+        self.schema_calls = 0
+        self.closed = False
+
+    def ensure_schema(self) -> None:
+        self.schema_calls += 1
+
+    def ping(self) -> bool:
+        return self.reachable
+
+    def sync_repo(self, ws: str, repo: str, commit: str | None, records: GraphRecords) -> None:
+        if self.fail:
+            raise ConnectionError("simulated Neo4j outage")
+        self.repos[(ws, repo)] = records
+        self.commits[(ws, repo)] = commit
+
+    def delete_repo(self, ws: str, repo: str) -> None:
+        if self.fail:
+            raise ConnectionError("simulated Neo4j outage")
+        self.repos.pop((ws, repo), None)
+        self.deleted.append((ws, repo))
+
+    def endpoints(self, ws: str, repo: str) -> list[dict[str, Any]]:
+        records = self.repos.get((ws, repo), GraphRecords())
+        return [asdict(e) for e in records.endpoints]
+
+    def trace_endpoint(self, ws: str, repo: str, method: str, path: str) -> Trace | None:
+        endpoint = match_endpoint(self.endpoints(ws, repo), method, path)
+        if endpoint is None:
+            return None
+        records = self.repos[(ws, repo)]
+        nodes = {
+            f.id: {
+                "id": f.id, "name": f.name, "path": f.path, "line": f.line,
+                "end_line": f.end_line, "unresolved": list(f.unresolved),
+            }
+            for f in records.functions
+        }  # fmt: skip
+        outgoing: dict[str, list[Any]] = defaultdict(list)
+        for call in records.calls:
+            outgoing[call.caller].append(call)
+        paths: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+
+        def walk(path_nodes: list[dict[str, Any]], rels: list[dict[str, Any]]) -> None:
+            paths.append((path_nodes, rels))
+            if len(rels) == MAX_TRACE_DEPTH:
+                return
+            for call in outgoing[path_nodes[-1]["id"]]:
+                if all(node["id"] != call.callee for node in path_nodes):
+                    walk(
+                        [*path_nodes, nodes[call.callee]],
+                        [*rels, {"via": call.via, "line": call.line}],
+                    )
+
+        walk([nodes[endpoint["handler"]]], [])
+        return assemble_trace(endpoint, paths, [asdict(a) for a in records.accesses])
+
+    def neighbours(self, ws: str, repo: str, function: str, direction: str) -> list[dict[str, Any]]:
+        records = self.repos.get((ws, repo), GraphRecords())
+        by_id = {f.id: f for f in records.functions}
+
+        def matches(fid: str) -> bool:
+            name = by_id[fid].name
+            return function in (name, fid) or name.endswith("." + function)
+
+        rows = []
+        for call in records.calls:
+            target, other = (
+                (call.callee, call.caller) if direction == "in" else (call.caller, call.callee)
+            )
+            if matches(target):
+                f = by_id[other]
+                rows.append({
+                    "id": f.id, "name": f.name, "path": f.path, "line": f.line,
+                    "end_line": f.end_line, "via": call.via, "call_line": call.line,
+                    "target": target,
+                })  # fmt: skip
+        return rows
+
+    def close(self) -> None:
+        self.closed = True

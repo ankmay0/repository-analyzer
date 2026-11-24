@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from repo_analyzer.benchmark.compare import CompareService
 from repo_analyzer.benchmark.service import BenchmarkService
 from repo_analyzer.config import Settings
 from repo_analyzer.ingestion.fetcher import RepoFetcher
+from repo_analyzer.ingestion.graph_store import GraphStore, Neo4jGraphStore, graph_workspace_key
 from repo_analyzer.ingestion.jobs import IndexJobRunner
 from repo_analyzer.ingestion.metadata import MetadataStore, generate_endpoint_metadata
 from repo_analyzer.ingestion.pipeline import IndexingService
@@ -23,6 +25,8 @@ from repo_analyzer.ingestion.repo_index import RepoIndex, RepoIndexStore
 from repo_analyzer.ingestion.scanner import scan_repository
 from repo_analyzer.retrieval.embeddings import Embedder
 from repo_analyzer.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +38,20 @@ class Services:
     skills: SkillLibrary
     benchmark: BenchmarkService
     compare: CompareService
+    graph_store: GraphStore | None = None  # None unless RA_GRAPH_ENABLED
+    graph_ws: str = ""
+
+
+def _build_graph_store(settings: Settings, injected: GraphStore | None) -> GraphStore | None:
+    """The Neo4j store when the graph is enabled; ``None`` keeps today's behaviour."""
+    if not settings.graph_enabled:
+        return None
+    store = injected if injected is not None else Neo4jGraphStore.from_settings(settings)
+    try:
+        store.ensure_schema()
+    except Exception as exc:  # Neo4j down or the extra missing: retried on first sync
+        logger.warning("Code graph schema setup failed (will retry when indexing): %s", exc)
+    return store
 
 
 def build_services(
@@ -41,6 +59,7 @@ def build_services(
     *,
     model_factory: Callable[[], BaseChatModel] | None = None,
     benchmark_embedder_factory: Callable[[], Embedder] | None = None,
+    graph_store: GraphStore | None = None,
 ) -> Services:
     index_store = RepoIndexStore(settings.repos_dir)
     workspace = Workspace(settings.workspace_file)
@@ -57,6 +76,8 @@ def build_services(
         files = scan_repository(index["name"], root, max_file_bytes=settings.max_file_bytes)
         return generate_endpoint_metadata(index, files, make_model())
 
+    graph = _build_graph_store(settings, graph_store)
+    graph_ws = graph_workspace_key(settings.data_dir)
     indexing = IndexingService(
         settings,
         fetcher,
@@ -64,6 +85,8 @@ def build_services(
         workspace,
         metadata_hook=describe_endpoints if metadata_store is not None else None,
         metadata_store=metadata_store,
+        graph_store=graph,
+        graph_ws=graph_ws,
     )
     skills = SkillLibrary.load(settings.skills_dir)
     chat = build_chat_agent(
@@ -90,4 +113,6 @@ def build_services(
         skills=skills,
         benchmark=benchmark,
         compare=CompareService(benchmark, workspace),
+        graph_store=graph,
+        graph_ws=graph_ws,
     )

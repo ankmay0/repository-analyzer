@@ -5,11 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from repo_analyzer.config import Settings
 from repo_analyzer.domain import RepoSnapshot
 from repo_analyzer.errors import InvalidRepositorySourceError, RepositoryFetchError
+from repo_analyzer.ingestion.fetcher import RepoFetcher
 from repo_analyzer.ingestion.pipeline import IndexingService
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.workspace import Workspace
+from support import FakeGraphStore
 
 
 def test_indexing_writes_one_json_file_per_repository(
@@ -172,3 +175,83 @@ def test_a_workspace_file_from_the_old_format_is_ignored(tmp_path: Path) -> None
     state_file = tmp_path / "workspace.json"
     state_file.write_text(json.dumps({"schema_version": 1, "repositories": [], "graph": {}}))
     assert Workspace(state_file).state.repositories == ()
+
+
+def graph_indexing(
+    settings: Settings, index_store: RepoIndexStore, workspace: Workspace, store: FakeGraphStore
+) -> IndexingService:
+    fetcher = RepoFetcher(
+        settings.checkouts_dir, allowed_hosts=settings.allowed_git_hosts, allow_local_paths=True
+    )
+    return IndexingService(
+        settings, fetcher, index_store, workspace, graph_store=store, graph_ws="ws-1"
+    )
+
+
+def test_code_graph_is_synced_after_indexing(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    fixture_repos: dict[str, Path],
+) -> None:
+    store = FakeGraphStore()
+    progress: list[str] = []
+
+    graph_indexing(settings, index_store, workspace, store).run(
+        [str(p) for p in fixture_repos.values()], progress.append
+    )
+
+    assert set(store.repos) == {("ws-1", n) for n in ("core-lib", "mid-lib", "web-app", "tools")}
+    mid = store.repos[("ws-1", "mid-lib")]
+    assert [f.name for f in mid.functions] == ["create_session"]
+    assert {f.path for f in store.repos[("ws-1", "core-lib")].files} == {
+        "pyproject.toml",
+        "src/core_lib/tokens.py",
+    }  # the scanner's allow-list applies: no .env in the graph
+    assert "Building code graph" in progress
+    assert progress[-1] == "Indexed 4 repositories"
+
+
+def test_repositories_leaving_the_workspace_are_removed_from_the_graph(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    fixture_repos: dict[str, Path],
+) -> None:
+    store = FakeGraphStore()
+    indexing = graph_indexing(settings, index_store, workspace, store)
+    indexing.run([str(p) for p in fixture_repos.values()])
+
+    indexing.run([str(fixture_repos["core-lib"])])
+
+    assert set(store.deleted) == {("ws-1", "mid-lib"), ("ws-1", "web-app"), ("ws-1", "tools")}
+    assert set(store.repos) == {("ws-1", "core-lib")}
+
+
+def test_a_graph_failure_never_fails_indexing(
+    settings: Settings,
+    index_store: RepoIndexStore,
+    workspace: Workspace,
+    fixture_repos: dict[str, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = FakeGraphStore(fail=True)
+    indexing = graph_indexing(settings, index_store, workspace, store)
+    indexing.run([str(fixture_repos["core-lib"]), str(fixture_repos["mid-lib"])])
+
+    state = indexing.run([str(fixture_repos["core-lib"])])
+
+    assert [r.name for r in state.repositories] == ["core-lib"]
+    assert index_store.load("local__core-lib.json")["name"] == "core-lib"
+    assert "Code graph for core-lib failed" in caplog.text
+    assert "Removing mid-lib from the code graph failed" in caplog.text
+
+
+def test_without_a_graph_store_nothing_graph_related_happens(
+    indexing: IndexingService, fixture_repos: dict[str, Path]
+) -> None:
+    progress: list[str] = []
+
+    indexing.run([str(fixture_repos["core-lib"])], progress.append)
+
+    assert "Building code graph" not in progress

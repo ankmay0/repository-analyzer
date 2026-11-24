@@ -80,6 +80,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Code graph (Neo4j) -------------------------------------------------------
+    graph_enabled: bool = Field(
+        default=False,
+        description=(
+            "After indexing, load each repository's code graph (endpoints, functions, calls, "
+            "tables) into Neo4j. Needs the `graph` extra and a reachable database. A Neo4j "
+            "failure is logged and never fails indexing."
+        ),
+    )
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_database: str = "neo4j"
+    neo4j_password: SecretStr | None = Field(default=None, validation_alias="NEO4J_PASSWORD")
+
     # --- Benchmark -------------------------------------------------------------
     benchmarks_dir: Path = Field(
         default_factory=default_benchmarks_dir,

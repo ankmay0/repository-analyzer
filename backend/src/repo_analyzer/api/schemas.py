@@ -80,6 +80,7 @@ class HealthOut(BaseModel):
     llm_model: str
     ctags_available: bool
     ctags_version: str | None
+    graph_available: bool  # RA_GRAPH_ENABLED and Neo4j reachable
 
 
 class SkillOut(BaseModel):

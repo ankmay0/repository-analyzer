@@ -39,6 +39,10 @@ class CtagsError(AnalyzerError):
     """Universal Ctags is missing, is not usable, or failed during indexing."""
 
 
+class GraphUnavailableError(AnalyzerError):
+    """The code graph is enabled but Neo4j or its driver cannot be used."""
+
+
 class BenchmarkUnavailableError(AnalyzerError):
     """The benchmark questions or fixture apps are not on this machine."""
 

@@ -9,9 +9,15 @@ package manifests, and the functions, classes and imports of each source file. A
 agent, orchestrated with LangGraph, then answers questions by reading those JSON files,
 searching the code for exact text and reading files, and cites `repo/path:line`.
 
-There is no vector database, no embedding model and no dependency graph. The JSON files
-are readable by people and by other tools. A one-page picture of the design is in
-[`docs/architecture.html`](docs/architecture.html).
+There is no vector database and no embedding model in the main flow. The JSON files are
+readable by people and by other tools. Optionally (`RA_GRAPH_ENABLED=true`) each indexed
+repository is also loaded into **Neo4j as a code graph** (endpoints, functions, calls and
+the tables each function reads or writes) so a request can be traced from the router to
+the database; the graph is rebuilt from the checkout on every run and the JSON stays the
+source of truth. A one-page picture of the design is in
+[`docs/architecture.html`](docs/architecture.html). Detailed backend docs are in
+[`backend/docs/`](backend/docs/): [architecture](backend/docs/architecture.md),
+[data models](backend/docs/datamodels.md) and [data flow](backend/docs/dataflow.md).
 
 ## Architecture
 
@@ -29,6 +35,8 @@ are readable by people and by other tools. A one-page picture of the design is i
 │     symbols     Universal Ctags: functions, classes, imports                   │
 │     manifests   package.json, pyproject.toml, setup.cfg, requirements, go.mod  │
 │     repo_index  one JSON file per repository: repos/<owner>__<name>.json       │
+│     metadata    optional: one model call per repo, endpoint data-flow notes    │
+│     graph_*     optional: ast → endpoints, calls, tables → Neo4j code graph    │
 │                                                                                │
 │  POST /chat ──► agent/   LangGraph:  START → agent ⇄ tools → END               │
 │     tools: list_repositories, get_repository_info, search_code,                │
@@ -42,7 +50,9 @@ Backend layout (`backend/src/repo_analyzer/`):
 | --- | --- |
 | `domain.py` | Immutable value types shared by every layer |
 | `config.py` | All settings, overridable by `RA_*` environment variables |
-| `ingestion/` | Fetch, scan, run Universal Ctags for symbols, parse manifests, write the JSON indexes, run indexing jobs |
+| `ingestion/` | Fetch, scan, run Universal Ctags for symbols, parse manifests, write the JSON indexes, run indexing jobs; optional endpoint metadata and the Neo4j code graph (`graph_extract.py`, `graph_store.py`) |
+| `retrieval/` | Optional in-memory embeddings for the benchmark's `json-embeddings` approach |
+| `benchmark/` | The four answering approaches, the Compare service and the CLI benchmark |
 | `agent/` | Tools (including `load_skill`), system prompt, skill loader, the LangGraph graph, and the service that streams a turn |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
 | `workspace.py` | The current set of indexed repositories, persisted as `workspace.json` |
@@ -122,6 +132,14 @@ constants, properties and symbols nested inside a function are dropped. Imports
 are whatever Ctags reports as reference tags, which is language-dependent and
 often empty for JavaScript and TypeScript. If Ctags is missing or fails, indexing
 fails with a clear error; there is no fallback parser.
+
+**An optional code graph for tracing, derived and disposable.** The JSON index says
+where things are declared but not who calls whom, so tracing a request means many search
+and read hops. With `RA_GRAPH_ENABLED=true` indexing also parses Python with `ast` and
+loads endpoints, calls and table reads/writes into Neo4j. It is built last and a Neo4j
+failure is only logged, so indexing never depends on it; with the flag off nothing
+graph-related runs. The graph stores names, paths, line numbers, routes and table names,
+never source text, and is queried only with fixed, parameterised Cypher.
 
 **Repository content is untrusted input.** URLs are validated against a host allow-list
 before `git` runs, with no shell and no option injection. The scanner indexes an allow-list
@@ -233,10 +251,22 @@ npm install
 npm run dev                 # http://localhost:5173
 ```
 
+If `python -m repo_analyzer` fails with `No module named 'uvicorn'`, `python` is not the
+venv's interpreter (for example MSYS2's Python is first on `PATH`). Start it from `backend`
+with `.\.venv\Scripts\python.exe -m repo_analyzer` (or `uv run python -m repo_analyzer`).
+In Git Bash, activate with `source .venv/Scripts/activate`.
+
 Open http://localhost:5173, press **Index repositories** (the form is pre-filled with
 `pallets/markupsafe`, `pallets/jinja` and `pallets/flask`), then ask a question. Indexing
 takes seconds and downloads nothing but the repositories. The JSON files appear in
 `backend/.data/repos/`.
+
+Optional code graph: start Neo4j 5 (for example
+`docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/your-password neo4j:5`),
+run `pip install -e ".[graph]"` in `backend`, set `RA_GRAPH_ENABLED=true` and
+`NEO4J_PASSWORD=your-password` in `backend/.env`, restart and re-index. `/api/health`
+then reports `graph_available: true`, and Neo4j Browser (http://localhost:7474) shows the
+graph.
 
 Upgrading from the embeddings version: delete `RA_DATA_DIR/index` and the old clone
 folders in `RA_DATA_DIR/repos/` (clones now live in `RA_DATA_DIR/checkouts/`), then
@@ -260,12 +290,17 @@ Set in the environment or in `backend/.env`. The full list is in
 | `RA_SKILLS_DIR` | packaged `skills/` | Directory of Agent Skills (`<name>/SKILL.md`). Loaded once at startup. |
 | `RA_BENCHMARKS_DIR` | `<checkout>/benchmarks` | Where the compare API and the CLI benchmark find `questions.yaml` and `fixtures/` |
 | `RA_ENDPOINT_METADATA` | `false` | After indexing, ask the model once per repository for per-endpoint data-flow metadata and give the agent a `get_endpoint_metadata` tool |
+| `RA_GRAPH_ENABLED` | `false` | After indexing, load each repository's code graph into Neo4j (needs `pip install -e ".[graph]"`) |
+| `RA_NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt address |
+| `RA_NEO4J_USER` | `neo4j` | Neo4j user |
+| `RA_NEO4J_DATABASE` | `neo4j` | Neo4j database name |
+| `NEO4J_PASSWORD` | — | Neo4j password (no `RA_` prefix, like `ANTHROPIC_API_KEY`) |
 
 ### API
 
 | Method and path | Description |
 | --- | --- |
-| `GET /api/health` | Liveness, configured model, and whether Universal Ctags is available |
+| `GET /api/health` | Liveness, configured model, whether an API key is set (`llm_configured`; an empty key counts as not set), whether Universal Ctags is available, and `graph_available` (code graph enabled and Neo4j reachable) |
 | `GET /api/workspace` | Indexed repositories (owner, branch, commit, file/symbol/dependency counts, JSON file name) and indexing job status |
 | `POST /api/workspace/index` | `{"repositories": [url, ...]}` — replaces the workspace; returns 202 |
 | `GET /api/skills` | Installed Agent Skills (name and description only) |
@@ -319,15 +354,18 @@ Symbol tests feed Ctags JSON as canned lines, so they do not need the binary; on
 that runs real Ctags is skipped if it is not installed. Indexing the fixture
 repositories in the other tests does require Universal Ctags. The agent and the HTTP
 API are driven with a scripted chat model. Skill tests cover parsing, invalid
-frontmatter, the catalogue in the system prompt, and the `load_skill` tool.
+frontmatter, the catalogue in the system prompt, and the `load_skill` tool. Code-graph
+tests run the extractor on the `shop-api` fixture and use an in-memory `FakeGraphStore`,
+so no Neo4j is needed; the one Neo4j round-trip test runs only when `RA_TEST_NEO4J_URI`
+(and `RA_TEST_NEO4J_PASSWORD`) are set.
 
 ## Limitations
 
 - **Exact search only.** Without embeddings, `search_code` finds what the code literally
   says. A question like "where is authentication handled?" works less well when the code
   never uses that word; the agent has to guess likely spellings and browse the file tree.
-- **No cross-repository analysis.** There is no dependency graph and no "what breaks if X
-  fails" answer. The JSON lists each repository's declared dependencies, and the agent can
+- **No cross-repository analysis.** There is no cross-repository dependency graph and no
+  "what breaks if X fails" answer. The JSON lists each repository's declared dependencies, and the agent can
   reason from those and from usages it finds, but nothing computes impact.
 - **Symbols are only as complete as Ctags.** Arrow functions assigned to `const` are
   usually tagged as constants and therefore dropped. TypeScript class methods in `.tsx`
@@ -349,6 +387,10 @@ frontmatter, the catalogue in the system prompt, and the `load_skill` tool.
   only after every repository has been fetched and scanned, so a failed run keeps the
   previous indexes, though checkouts fetched before the failure are already refreshed.
 - **Default branch only**, at the commit current when indexing ran.
+- **Code graph coverage** (optional feature): Python only, FastAPI routes only
+  (`include_router(..., prefix=...)` prefixes are not applied), calls resolved by name so
+  dynamic dispatch and dependency injection show up as gaps, and tables are linked within
+  one repository only.
 
 ### Compare tab
 

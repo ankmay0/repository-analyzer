@@ -47,15 +47,16 @@
 <body>
 <div class="wrap">
   <h1>Repository Analyzer</h1>
-  <p class="sub">Give it a few GitHub repo links. It writes one simple JSON file describing each repo, then answers questions about them by reading those files and the code.</p>
+  <p class="sub">Give it a few GitHub repo links. It writes one simple JSON file describing each repo, then answers questions about them by reading those files and the code. Optionally it also loads a code graph into Neo4j so a request can be traced from the router to the database.</p>
 
   <div class="layer ui">
     <div class="tag">Frontend</div>
     <h2>React web app (Vite)</h2>
-    <p>Two panels in the browser at <code>localhost:5173</code>.</p>
+    <p>Two tabs in the browser at <code>localhost:5173</code>.</p>
     <div class="chips">
-      <span class="chip">Repositories panel: add and index repos</span>
-      <span class="chip">Chat: ask questions about the code</span>
+      <span class="chip">Chat tab: index repos, ask questions, see tokens per answer</span>
+      <span class="chip">Answers draw Mermaid diagrams</span>
+      <span class="chip">Compare tab: one question, four approaches side by side</span>
     </div>
   </div>
 
@@ -69,6 +70,8 @@
       <span class="chip"><code>POST /api/workspace/index</code></span>
       <span class="chip"><code>POST /api/chat</code></span>
       <span class="chip"><code>GET /api/workspace</code></span>
+      <span class="chip"><code>POST /api/compare</code></span>
+      <span class="chip"><code>GET /api/health</code></span>
     </div>
   </div>
 
@@ -84,6 +87,8 @@
         <li><b>Symbols</b> run Universal Ctags once per repo for functions, classes and imports (imports only as complete as Ctags makes them)</li>
         <li><b>Manifests</b> read <code>package.json</code>, <code>pyproject.toml</code>, <code>go.mod</code> and similar</li>
         <li><b>Writer</b> saves one JSON file per repo</li>
+        <li><i>Optional:</i> <b>endpoint metadata</b>, one AI call per repo describing each endpoint's data flow (<code>RA_ENDPOINT_METADATA</code>)</li>
+        <li><i>Optional:</i> <b>code graph</b>, Python <code>ast</code> finds endpoints, calls and table reads/writes and loads them into Neo4j (<code>RA_GRAPH_ENABLED</code>); a Neo4j failure never fails indexing</li>
       </ul>
     </div>
     <div class="layer ret">
@@ -103,6 +108,7 @@
       <ul class="steps">
         <li><b>LangGraph</b> loop: the agent picks a tool, reads the result, repeats</li>
         <li>Tools: <code>list_repositories</code>, <code>get_repository_info</code>, <code>search_code</code>, <code>read_file</code>, <code>load_skill</code></li>
+        <li>Optional tool: <code>get_endpoint_metadata</code> when endpoint metadata is on</li>
         <li>A short system prompt plus a catalogue of Agent Skills; the agent loads a skill with <code>load_skill</code> when it fits</li>
         <li>Answers cite <code>repo/path:line</code></li>
       </ul>
@@ -130,7 +136,12 @@
     <div class="layer ext">
       <div class="tag">External</div>
       <h2>Anthropic Claude</h2>
-      <p>The language model behind chat. Only chat needs the API key.</p>
+      <p>The language model behind chat, Compare and the benchmark. Indexing needs no key unless endpoint metadata is on.</p>
+    </div>
+    <div class="layer ext">
+      <div class="tag">Optional</div>
+      <h2>Neo4j</h2>
+      <p>Holds the code graph: Endpoint &rarr; Function &rarr; &hellip; &rarr; Table. Rebuilt from the checkout on every indexing run; the JSON files stay the source of truth.</p>
     </div>
   </div>
 
@@ -142,7 +153,8 @@
         <li>The Repositories panel sends the URLs to <code>/api/workspace/index</code></li>
         <li>Each repo is cloned, scanned, and its symbols and manifests are read</li>
         <li>One JSON file per repo is written to <code>.data/repos/</code></li>
-        <li>Universal Ctags is required. No AI and no model download, so it is fast and gives the same result every time</li>
+        <li>If the code graph is on, each repo's endpoints, calls and tables are loaded into Neo4j</li>
+        <li>Universal Ctags is required. No AI by default and no model download, so it is fast and gives the same result every time</li>
       </ol>
     </div>
     <div class="flow">
@@ -151,13 +163,22 @@
         <li>Chat sends the question to <code>/api/chat</code></li>
         <li>The agent may call <code>load_skill</code> (for example <code>trace-feature</code>), then <code>get_repository_info</code>, <code>search_code</code> and <code>read_file</code></li>
         <li>Claude writes the answer using what the tools found</li>
-        <li>The answer streams back word by word, with <code>repo/path:line</code> citations</li>
+        <li>The answer streams back word by word, with <code>repo/path:line</code> citations, then a token and latency summary</li>
+      </ol>
+    </div>
+    <div class="flow">
+      <h3>Compare: "How is an order priced?"</h3>
+      <ol>
+        <li>The Compare tab sends one question to <code>/api/compare</code></li>
+        <li>Four approaches answer at once: the Chat agent, JSON + endpoint metadata, tools only, JSON + embeddings</li>
+        <li>Each column streams its answer with tokens, latency and tool calls</li>
+        <li>For graded runs over the known-answer questions use <code>python -m repo_analyzer.benchmark</code></li>
       </ol>
     </div>
   </div>
   </div>
 
-  <p class="note">The agent's long instructions live in Agent Skills under <code>backend/skills/</code>; Universal Ctags provides symbols (no ast or regex fallback). JSON files replace embeddings, the vector store, the dependency graph and impact analysis. Search is exact text, so it works best with the words the code actually uses. <code>ankmay0/repository-analyzer</code>, November 22, 2026.</p>
+  <p class="note">The agent's long instructions live in Agent Skills under <code>backend/skills/</code>; Universal Ctags provides the symbols in the JSON index. The optional Neo4j code graph is derived from the checkout with Python's <code>ast</code> and can be dropped at any time. There is no vector database; embeddings exist only in memory for the benchmark's <code>json-embeddings</code> approach. Search is exact text, so it works best with the words the code actually uses. Detailed docs: <code>backend/docs/</code>. <code>ankmay0/repository-analyzer</code>, November 24, 2026.</p>
 </div>
 </body>
 </html>

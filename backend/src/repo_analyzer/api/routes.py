@@ -34,12 +34,15 @@ ServicesDep = Annotated[Services, Depends(get_services)]
 @router.get("/health")
 def health(services: ServicesDep) -> HealthOut:
     version = probe_ctags(services.settings.ctags_path)
+    key = services.settings.anthropic_api_key
+    graph = services.graph_store
     return HealthOut(
         status="ok",
-        llm_configured=services.settings.anthropic_api_key is not None,
+        llm_configured=key is not None and bool(key.get_secret_value()),
         llm_model=services.settings.llm_model,
         ctags_available=version is not None,
         ctags_version=version,
+        graph_available=graph is not None and graph.ping(),
     )
 
 
@@ -68,7 +71,8 @@ async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
     """Answer a question as a server-sent event stream.
 
     Events: ``token`` (answer text), ``tool_call`` (an agent step), ``sources``
-    (file ranges the step returned), ``error``, and a final ``done``.
+    (file ranges the step returned), ``error``, ``usage`` (tokens and latency for the
+    answer), and a final ``done``.
     """
     # Fail with a proper status code while that is still possible; once the stream
     # has started, errors can only be reported as events.

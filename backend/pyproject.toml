@@ -24,6 +24,8 @@ dependencies = [
 embeddings = ["fastembed>=0.4"]
 # The benchmark runner reads benchmarks/questions.yaml.
 benchmark = ["pyyaml>=6"]
+# Neo4j code graph (RA_GRAPH_ENABLED=true).
+graph = ["neo4j>=5.20"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

@@ -13,7 +13,7 @@ from repo_analyzer.agent.skills import SkillLibrary, default_skills_dir
 from repo_analyzer.api.app import create_app
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
-from support import ScriptedChatModel, tool_call
+from support import FakeGraphStore, ScriptedChatModel, tool_call
 
 
 @pytest.fixture
@@ -61,6 +61,7 @@ async def test_health(client: httpx.AsyncClient) -> None:
     assert body["llm_model"] == "claude-opus-5-5"
     assert body["ctags_available"] is True
     assert body["ctags_version"] is not None and "Universal Ctags" in body["ctags_version"]
+    assert body["graph_available"] is False  # RA_GRAPH_ENABLED is off by default
 
 
 async def test_index_then_inspect_workspace_and_json_files(
@@ -231,3 +232,51 @@ async def test_list_skills(client: httpx.AsyncClient) -> None:
     review = next(item for item in body if item["name"] == "dependency-review")
     assert "dependencies" in review["description"]
     assert "body" not in review
+
+
+async def test_health_says_an_empty_api_key_is_not_configured(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    app = create_app(Settings(_env_file=None, data_dir=settings.data_dir))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        body = (await http.get("/api/health")).json()
+
+    assert body["llm_configured"] is False
+
+
+async def test_graph_enabled_indexing_fills_the_injected_graph_store(
+    settings: Settings, model: ScriptedChatModel, fixture_repos: dict[str, Path]
+) -> None:
+    store = FakeGraphStore()
+    app = create_app(
+        settings.model_copy(update={"graph_enabled": True}),
+        model_factory=lambda: model,
+        graph_store=store,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        assert (await http.get("/api/health")).json()["graph_available"] is True
+        await index(http, app, [str(fixture_repos["mid-lib"])])
+
+    ws = app.state.services.graph_ws
+    assert store.schema_calls == 1
+    assert [f.name for f in store.repos[(ws, "mid-lib")].functions] == ["create_session"]
+
+
+async def test_an_injected_graph_store_is_ignored_while_the_graph_is_disabled(
+    settings: Settings, model: ScriptedChatModel, fixture_repos: dict[str, Path]
+) -> None:
+    store = FakeGraphStore()
+    app = create_app(settings, model_factory=lambda: model, graph_store=store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        assert (await http.get("/api/health")).json()["graph_available"] is False
+        await index(http, app, [str(fixture_repos["mid-lib"])])
+
+    assert app.state.services.graph_store is None
+    assert store.repos == {} and store.schema_calls == 0
