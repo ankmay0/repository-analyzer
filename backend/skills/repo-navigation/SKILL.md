@@ -28,6 +28,17 @@ Everything you state about them must come from the tools below.
 - **read_file**: read a file or line range once you know where to look. At most
   400 lines are returned per call; request another range if you need more.
 
+## Code graph tools (only when the code graph is enabled)
+
+- **trace_endpoint**: an HTTP endpoint's path from its handler through the
+  functions it calls to the tables they read or write, with line ranges.
+- **callers_of** / **callees_of**: who calls a function, and what it calls.
+
+They cover Python with FastAPI routes and are built by static analysis: calls
+through variables, dependency injection or dynamic dispatch are missing, and
+gaps are listed. Use them to find where to read, then confirm with `read_file`.
+If they are not in your tool list, use `search_code` and `read_file`.
+
 ## JSON index and symbols
 
 Functions, classes and imports in the JSON come from Universal Ctags. Import

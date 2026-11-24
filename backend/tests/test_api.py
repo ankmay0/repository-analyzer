@@ -300,3 +300,43 @@ def test_startup_log_summarises_settings_without_secrets(
     assert "Code graph: enabled uri=bolt://localhost:7687" in caplog.text
     assert "NEO4J_PASSWORD=set" in caplog.text
     assert "secret-value" not in caplog.text
+
+
+SHOP_API = Path(__file__).resolve().parents[2] / "benchmarks" / "fixtures" / "shop-api"
+
+
+async def test_chat_traces_an_endpoint_through_the_code_graph(settings: Settings) -> None:
+    model = ScriptedChatModel(
+        responses=[
+            tool_call("trace_endpoint", {"repo": "shop-api", "method": "POST", "path": "/orders"}),
+            AIMessage(content="create_order prices the cart with price_order."),
+        ]
+    )
+    store = FakeGraphStore()
+    app = create_app(
+        settings.model_copy(update={"graph_enabled": True}),
+        model_factory=lambda: model,
+        graph_store=store,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as http:
+        await index(http, app, [str(SHOP_API)])
+        response = await http.post(
+            "/api/chat", json={"thread_id": "t", "message": "Trace POST /orders"}
+        )
+
+    events = parse_sse(response.text)
+    assert events[0] == (
+        "tool_call",
+        {
+            "name": "trace_endpoint",
+            "args": {"repo": "shop-api", "method": "POST", "path": "/orders"},
+        },
+    )
+    sources = next(data["sources"] for name, data in events if name == "sources")
+    assert sources[0] == {
+        "repo": "shop-api", "path": "app/routers/orders.py", "start_line": 33, "end_line": 84,
+    }  # fmt: skip
+    tool_result = str(model.calls[1][-1].content)  # what the model saw from the tool
+    assert "1. price_order  shop-api/app/services/pricing.py:20-32" in tool_result

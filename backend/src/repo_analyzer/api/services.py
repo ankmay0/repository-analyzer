@@ -136,6 +136,8 @@ def build_services(
         prompt_caching=model_factory is None,
         skills=skills,
         metadata_store=metadata_store,
+        graph_store=graph,
+        graph_ws=graph_ws,
     )
     benchmark = BenchmarkService(
         settings,

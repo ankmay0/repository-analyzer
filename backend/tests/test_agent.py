@@ -5,13 +5,13 @@ import logging
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from repo_analyzer.agent.service import ChatEvent, ChatService
+from repo_analyzer.agent.service import ChatEvent, ChatService, chat_agent_tools_and_prompt
 from repo_analyzer.agent.tools import build_tools
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import LLMNotConfiguredError
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.workspace import Workspace
-from support import ScriptedChatModel, tool_call, usage
+from support import FakeGraphStore, ScriptedChatModel, tool_call, usage
 
 
 def make_service(
@@ -250,3 +250,20 @@ async def test_usage_is_still_reported_after_an_error(
     summary = events[-2].data
     assert summary["llm_calls"] >= 1
     assert summary["input_tokens"] == 100 * summary["llm_calls"]
+
+
+def test_the_chat_agent_gets_graph_tools_only_when_a_graph_store_is_passed(
+    settings: Settings, index_store: RepoIndexStore, workspace: Workspace
+) -> None:
+    base = ["get_repository_info", "list_repositories", "load_skill", "read_file", "search_code"]
+
+    without, prompt = chat_agent_tools_and_prompt(settings, index_store, workspace)
+    with_graph, prompt_with_graph = chat_agent_tools_and_prompt(
+        settings, index_store, workspace, graph_store=FakeGraphStore(), graph_ws="ws"
+    )
+
+    assert sorted(t.name for t in without) == base
+    assert sorted(t.name for t in with_graph) == sorted(
+        [*base, "callees_of", "callers_of", "trace_endpoint"]
+    )
+    assert prompt == prompt_with_graph  # the system prompt (and its cache) is unchanged

@@ -488,6 +488,8 @@ the catalogue is stable and prompt-cacheable.
 | `read_file` | The returned range |
 | `get_endpoint_metadata` | Each entry `location` (≤ 20) |
 | `semantic_search` | Each returned chunk |
+| `trace_endpoint` | Each step's function range (handler first, ≤ 60) |
+| `callers_of`, `callees_of` | Each listed function's range (≤ 50) |
 | `list_repositories`, `load_skill`, `list_files` | none |
 
 ### Conversation state

@@ -217,6 +217,8 @@ flowchart LR
     RF --> CK
     LS[load_skill] --> SL["SkillLibrary<br/>in memory"]
     GEM["get_endpoint_metadata<br/>(if RA_ENDPOINT_METADATA)"] --> WSS
+    TE["trace_endpoint · callers_of · callees_of<br/>(if RA_GRAPH_ENABLED)"] --> WSS
+    TE --> NEO[("Neo4j code graph")]
     GEM --> MDF[("repos/owner__name.metadata.json")]
 ```
 
@@ -231,6 +233,8 @@ indexing run sees either the old or the new set within one call, never a mix.
 | `read_file` | Must stay inside root, indexable type, ≤ `max_file_bytes`, UTF-8; ≤ 400 numbered lines with a header |
 | `load_skill` | Skill markdown, or an error listing names |
 | `get_endpoint_metadata` | Whole metadata file as compact JSON, or "No endpoint metadata exists" |
+| `trace_endpoint` | Route matched exactly or by `{param}` template; one indented line per step (`depth. function  repo/path:start-end  [called/passed as a function at line n]`), `reads/writes table x (line n)` under it, then gaps; no match → the repo's endpoint list; Neo4j errors → "Error: … use search_code" |
+| `callers_of` / `callees_of` | Matched by name, `Class.method` or id; one line per function with its range and the call line |
 
 Expected tool failures become `"Error: …"` text for the model; they do not end the turn.
 

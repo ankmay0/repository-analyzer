@@ -306,7 +306,8 @@ database) and `repo`. Extraction rules (`graph_extract.py`):
 `GraphStore.trace_endpoint(ws, repo, method, path)` matches the route (exact, then
 `{param}` templates), follows `CALLS*0..6` from the handler, and returns depth-first steps
 in call-line order with each function's tables and the trace's gaps
-(`assemble_trace`). The agent tools that use it arrive in Phase 2.
+(`assemble_trace`). The Chat agent reaches it through `trace_endpoint`, `callers_of` and
+`callees_of` (§7).
 
 Step-by-step sequence: [dataflow.md §2](dataflow.md#2-indexing-flow).
 
@@ -350,6 +351,8 @@ model's context.
 | `get_endpoint_metadata(repo)` | only if `RA_ENDPOINT_METADATA` | `*.metadata.json` | Compact metadata JSON | ≤ 20 entry `location`s |
 | `list_files(repo, path?)` | no (benchmark `tools-only`) | Checkout, scanned | ≤ 500 `path (n lines)` | `[]` |
 | `semantic_search(query, repo?, k?)` | no (benchmark `json-embeddings`) | In-memory `EmbeddingIndex` | Top-k chunks (k ≤ 15) | One per chunk |
+| `trace_endpoint(repo, method, path)` | only if `RA_GRAPH_ENABLED` | Neo4j code graph | Handler and callees depth-first in call order (≤ 6 deep, ≤ 60 steps), each `repo/path:start-end`, how it was reached, tables read/written; gaps; or the repo's endpoint list when nothing matches | One per step |
+| `callers_of(repo, function)` / `callees_of(repo, function)` | only if `RA_GRAPH_ENABLED` | Neo4j code graph | ≤ 50 functions with ranges and call lines | One per function |
 
 Tool safety: `read_file` requires the resolved path to stay inside the checkout, to be an
 indexable type (same allow-list as the scanner), and to be ≤ `max_file_bytes`.
@@ -368,8 +371,8 @@ are loaded on demand with `load_skill`. Shipped skills in [`backend/skills/`](..
 | `dependency-review` | Declared dependencies and hidden coupling |
 | `draw-diagrams` | Mermaid flowcharts for request paths, data flow, component links |
 | `explain-architecture` | Structure, entry points, module layout |
-| `repo-navigation` | How to use the repository tools; index shape; Ctags caveats |
-| `trace-feature` | Follow a feature/request through files and repos |
+| `repo-navigation` | How to use the repository tools (and the optional graph tools); index shape; Ctags caveats |
+| `trace-feature` | Follow a feature/request through files and repos; for an HTTP endpoint it calls `trace_endpoint` first, reads each range, and falls back to `search_code` where the trace has gaps |
 
 Invalid or duplicate skill files are skipped with a warning.
 
@@ -388,7 +391,11 @@ Invalid or duplicate skill files are skipped with a warning.
    (`chat usage thread=… input=… output=… … latency_ms=…`).
 
 `build_chat_agent()` / `chat_agent_tools_and_prompt()` construct the Chat tab's agent so
-the benchmark's `chat` approach uses exactly the same tools and prompt.
+the benchmark's `chat` approach uses exactly the same tools and prompt. The graph tools are
+added only when a `graph_store` is passed explicitly, which `api/services.py` does when
+`RA_GRAPH_ENABLED` is on; the benchmark's `chat` approach does not pass one. Adding them
+does not change the system prompt (the skill catalogue is the same), so prompt caching is
+unaffected.
 
 ---
 

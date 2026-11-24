@@ -14,6 +14,7 @@ model as ordinary text so it can correct itself and retry.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,7 @@ from langchain_core.tools import BaseTool, tool
 from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.ingestion.graph_store import MAX_NEIGHBOURS, GraphStore
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import RepoIndex, RepoIndexStore
 from repo_analyzer.ingestion.scanner import language_for, scan_repository
@@ -40,6 +42,8 @@ MAX_LIST_FILES = 500
 
 Source = dict[str, Any]
 ToolOutput = tuple[str, list[Source]]
+
+logger = logging.getLogger(__name__)
 
 
 def _source(repo: str, path: str, start_line: int, end_line: int) -> Source:
@@ -106,8 +110,14 @@ def build_tools(
     workspace: Workspace,
     skills: SkillLibrary | None = None,
     metadata_store: MetadataStore | None = None,
+    graph_store: GraphStore | None = None,
+    graph_ws: str = "",
 ) -> list[BaseTool]:
-    """The chat agent's tools. ``metadata_store`` adds ``get_endpoint_metadata``."""
+    """The chat agent's tools.
+
+    ``metadata_store`` adds ``get_endpoint_metadata``; ``graph_store`` adds the code-graph
+    tools ``trace_endpoint``, ``callers_of`` and ``callees_of`` for workspace ``graph_ws``.
+    """
     library = skills if skills is not None else SkillLibrary.load(settings.skills_dir)
 
     def state() -> WorkspaceState:
@@ -293,7 +303,173 @@ def build_tools(
     ]
     if metadata_store is not None:
         tools.append(build_metadata_tool(metadata_store, workspace))
+    if graph_store is not None:
+        tools += build_graph_tools(graph_store, workspace, graph_ws)
     return tools
+
+
+def _span(path: str, line: int, end_line: int | None) -> str:
+    return f"{path}:{line}-{end_line}" if end_line and end_line != line else f"{path}:{line}"
+
+
+def build_graph_tools(graph_store: GraphStore, workspace: Workspace, ws: str) -> list[BaseTool]:
+    """``trace_endpoint``, ``callers_of`` and ``callees_of`` over the code graph.
+
+    Every query is fixed, parameterised Cypher inside ``graph_store``; the model only
+    supplies values (repository, method, path, function name), never query text.
+    """
+
+    def unknown_repo(repo: str) -> str | None:
+        try:
+            workspace.state.repository(repo)
+        except AnalyzerError as exc:
+            return f"Error: {exc}"
+        return None
+
+    def graph_error(exc: Exception) -> ToolOutput:
+        logger.warning("Code graph query failed: %s: %s", type(exc).__name__, exc)
+        return (
+            f"Error: the code graph could not be queried ({type(exc).__name__}). "
+            "Use search_code and read_file instead.",
+            [],
+        )
+
+    @tool(response_format="content_and_artifact")
+    def trace_endpoint(repo: str, method: str, path: str) -> ToolOutput:
+        """Trace an HTTP endpoint from its route handler down to the database tables.
+
+        Returns the handler and the functions it calls (directly or through other calls,
+        up to 6 deep) in call order, each with its `repo/path:start-end` range, and the
+        tables each function reads or writes. It comes from static analysis of the code:
+        read the listed ranges with `read_file` to explain what each step does to the
+        data, and follow any listed gaps with `search_code`.
+
+        Args:
+            repo: Repository name.
+            method: HTTP method, for example `GET` or `POST`.
+            path: The route as declared (`/orders/{order_id}`) or a concrete URL path
+                (`/orders/42`).
+        """
+        if error := unknown_repo(repo):
+            return error, []
+        try:
+            trace = graph_store.trace_endpoint(ws, repo, method, path)
+            endpoints = graph_store.endpoints(ws, repo) if trace is None else []
+        except Exception as exc:  # Neo4j down, driver missing, query timeout
+            return graph_error(exc)
+        if trace is None:
+            if not endpoints:
+                return (
+                    f"No endpoints are in the code graph for {repo} (only Python FastAPI "
+                    "routes are detected). Use search_code and read_file instead.",
+                    [],
+                )
+            listing = "\n".join(f"- {e['method']} {e['path']}" for e in endpoints)
+            return (
+                f"No endpoint matches {method.upper()} {path} in {repo}. "
+                f"Endpoints in the code graph:\n{listing}",
+                [],
+            )
+
+        lines = [
+            f"{trace.method} {trace.path} in {repo} (route declared at "
+            f"{repo}/{trace.file}:{trace.line})",
+            "Call path from the handler, depth-first in call order:",
+        ]
+        sources: list[Source] = []
+        for step in trace.steps:
+            indent = "  " * step.depth
+            location = f"{repo}/{_span(step.path, step.line, step.end_line)}"
+            if step.repeated:
+                lines.append(f"{indent}{step.depth}. {step.function}  {location}  (see above)")
+                continue
+            how = ""
+            if step.via is not None:
+                verb = "passed as a function" if step.via == "reference" else "called"
+                how = f"  [{verb} at line {step.call_line}]"
+            lines.append(f"{indent}{step.depth}. {step.function}  {location}{how}")
+            for table, kind, line in step.tables:
+                action = "reads" if kind == "READS" else "writes"
+                lines.append(f"{indent}     {action} table {table} (line {line})")
+            sources.append(_source(repo, step.path, step.line, step.end_line or step.line))
+        if trace.truncated:
+            lines.append("... cut at 60 steps; use callees_of to continue from a function.")
+        if not any(step.tables for step in trace.steps):
+            lines.append(
+                "No table access was found on this path: the data may come from a cache, "
+                "an external API, or code the graph does not model. Check with search_code."
+            )
+        if trace.gaps:
+            lines.append(
+                "Gaps (calls that matched several functions; resolve them with search_code): "
+                + ", ".join(trace.gaps)
+            )
+        else:
+            lines.append(
+                "Gaps: none recorded. Calls through variables, dependency injection or "
+                "dynamic dispatch are not in the graph."
+            )
+        return "\n".join(lines), sources
+
+    def neighbours(repo: str, function: str, direction: str) -> ToolOutput:
+        if error := unknown_repo(repo):
+            return error, []
+        try:
+            rows = graph_store.neighbours(ws, repo, function, direction)
+        except Exception as exc:
+            return graph_error(exc)
+        label = "callers of" if direction == "in" else "functions called by"
+        if not rows:
+            return (
+                f"No {label} {function!r} in the code graph for {repo}. Check the name "
+                "(`name` or `Class.method`), or use search_code.",
+                [],
+            )
+        targets = sorted({row["target"] for row in rows})
+        lines = [f"{len(rows)} {label} {function} in {repo}:"]
+        if len(targets) > 1:
+            lines.append(f"(the name matched {len(targets)} functions: {', '.join(targets)})")
+        sources: list[Source] = []
+        for row in rows:
+            where = (
+                f"calls it at line {row['call_line']}"
+                if direction == "in"
+                else f"called at line {row['call_line']}"
+            )
+            if row.get("via") == "reference":
+                where += ", passed as a function"
+            lines.append(
+                f"- {row['name']}  {repo}/{_span(row['path'], row['line'], row['end_line'])}"
+                f"  ({where})"
+            )
+            sources.append(_source(repo, row["path"], row["line"], row["end_line"] or row["line"]))
+        if len(rows) >= MAX_NEIGHBOURS:
+            lines.append(f"(showing the first {MAX_NEIGHBOURS})")
+        return "\n".join(lines), sources
+
+    @tool(response_format="content_and_artifact")
+    def callers_of(repo: str, function: str) -> ToolOutput:
+        """List the functions that call a function, from the code graph.
+
+        Args:
+            repo: Repository name.
+            function: Function name (`price_order`), method (`Repo.load`) or id
+                (`app/services/pricing.py:price_order`).
+        """
+        return neighbours(repo, function, "in")
+
+    @tool(response_format="content_and_artifact")
+    def callees_of(repo: str, function: str) -> ToolOutput:
+        """List the functions a function calls, from the code graph.
+
+        Args:
+            repo: Repository name.
+            function: Function name (`create_order`), method (`Repo.load`) or id
+                (`app/routers/orders.py:create_order`).
+        """
+        return neighbours(repo, function, "out")
+
+    return [trace_endpoint, callers_of, callees_of]
 
 
 def build_metadata_tool(metadata_store: MetadataStore, workspace: Workspace) -> BaseTool:

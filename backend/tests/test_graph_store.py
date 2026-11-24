@@ -148,6 +148,11 @@ def test_neo4j_round_trip_matches_the_in_memory_store() -> None:
         ]
         callers = {row["name"] for row in store.neighbours(ws, "shop-api", "to_order", "in")}
         assert callers == {"create_order", "list_orders", "get_order", "mark_order_paid"}
+        callees = store.neighbours(ws, "shop-api", "list_products", "out")
+        assert {(row["name"], row["via"]) for row in callees} == {
+            ("cached", "call"),
+            ("_load_active_products", "reference"),
+        }
     finally:
         store.delete_repo(ws, "shop-api")
         assert store.endpoints(ws, "shop-api") == []

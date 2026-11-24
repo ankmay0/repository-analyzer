@@ -108,7 +108,7 @@
       <ul class="steps">
         <li><b>LangGraph</b> loop: the agent picks a tool, reads the result, repeats</li>
         <li>Tools: <code>list_repositories</code>, <code>get_repository_info</code>, <code>search_code</code>, <code>read_file</code>, <code>load_skill</code></li>
-        <li>Optional tool: <code>get_endpoint_metadata</code> when endpoint metadata is on</li>
+        <li>Optional tools: <code>get_endpoint_metadata</code> when endpoint metadata is on; <code>trace_endpoint</code>, <code>callers_of</code> and <code>callees_of</code> when the code graph is on (the <code>trace-feature</code> skill uses <code>trace_endpoint</code> first for endpoint questions)</li>
         <li>A short system prompt plus a catalogue of Agent Skills; the agent loads a skill with <code>load_skill</code> when it fits</li>
         <li>Answers cite <code>repo/path:line</code></li>
       </ul>

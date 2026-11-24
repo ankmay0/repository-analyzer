@@ -27,6 +27,7 @@ from repo_analyzer.agent.tools import build_tools
 from repo_analyzer.agent.usage import UsageTracker
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import AnalyzerError
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.workspace import Workspace
@@ -235,14 +236,24 @@ def build_chat_agent(
     prompt_caching: bool = True,
     skills: SkillLibrary | None = None,
     metadata_store: MetadataStore | None = None,
+    graph_store: GraphStore | None = None,
+    graph_ws: str = "",
 ) -> ChatService:
     """The Chat tab's agent: same tools, skills and system prompt, pointed at ``workspace``.
 
     When ``metadata_store`` is omitted and ``settings.endpoint_metadata`` is on, the
-    on-disk store next to the JSON indexes is used, matching the Chat tab.
+    on-disk store next to the JSON indexes is used, matching the Chat tab. The code-graph
+    tools are added only when ``graph_store`` is passed explicitly (the API does so when
+    ``RA_GRAPH_ENABLED`` is on), so the benchmark's ``chat`` approach is unchanged.
     """
     tools, prompt = chat_agent_tools_and_prompt(
-        settings, index_store, workspace, skills=skills, metadata_store=metadata_store
+        settings,
+        index_store,
+        workspace,
+        skills=skills,
+        metadata_store=metadata_store,
+        graph_store=graph_store,
+        graph_ws=graph_ws,
     )
     return ChatService(
         model_factory,
@@ -260,6 +271,8 @@ def chat_agent_tools_and_prompt(
     *,
     skills: SkillLibrary | None = None,
     metadata_store: MetadataStore | None = None,
+    graph_store: GraphStore | None = None,
+    graph_ws: str = "",
 ) -> tuple[list[BaseTool], str]:
     """Tools and system prompt used by :func:`build_chat_agent` (and the Chat tab)."""
     library = skills if skills is not None else SkillLibrary.load(settings.skills_dir)
@@ -267,6 +280,6 @@ def chat_agent_tools_and_prompt(
     if store is None and settings.endpoint_metadata:
         store = MetadataStore(settings.repos_dir)
     return (
-        build_tools(settings, index_store, workspace, library, store),
+        build_tools(settings, index_store, workspace, library, store, graph_store, graph_ws),
         build_system_prompt(library),
     )

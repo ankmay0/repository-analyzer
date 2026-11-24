@@ -41,6 +41,7 @@ source of truth. A one-page picture of the design is in
 │  POST /chat ──► agent/   LangGraph:  START → agent ⇄ tools → END               │
 │     tools: list_repositories, get_repository_info, search_code,                │
 │            read_file, load_skill                                               │
+│            + trace_endpoint, callers_of, callees_of (code graph, optional)     │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -164,7 +165,7 @@ Shipped skills live in [`backend/skills/`](backend/skills):
 | `repo-navigation` | Exploring a workspace, looking up files or symbols, searching or reading code |
 | `answer-with-citations` | Any answer that states facts about the indexed repositories |
 | `explain-architecture` | Architecture, structure, overview, or "how does this project work" |
-| `trace-feature` | "Where is X handled", tracing a flow or feature across files |
+| `trace-feature` | "Where is X handled", tracing a flow or feature across files; with the code graph on, traces an HTTP endpoint to the database with `trace_endpoint` first |
 | `dependency-review` | Declared dependencies, hidden coupling, or "what breaks if X fails" |
 | `draw-diagrams` | Answers that explain a flow, request path or architecture: draw a Mermaid flowchart instead of a README-style table |
 
