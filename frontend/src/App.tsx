@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { ApiError, getWorkspace, startIndexing, type Workspace } from "./api";
+import { ApiError, getHealth, getWorkspace, startIndexing, type Workspace } from "./api";
 import { ComparePage } from "./compare/ComparePage";
 import { Chat } from "./components/Chat";
+import { HealthStatus, type HealthView } from "./components/HealthStatus";
 import { RepositoryPanel } from "./components/RepositoryPanel";
 
 const POLL_INTERVAL_MS = 1500;
@@ -14,6 +15,7 @@ const TAB_LABEL: Record<Tab, string> = { chat: "Chat", compare: "Compare" };
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthView>({ kind: "loading" });
   const [tab, setTab] = useState<Tab>("chat");
   // Mount the Compare page on first visit, then keep it (and any run it follows) alive.
   const [visited, setVisited] = useState<ReadonlySet<Tab>>(new Set(["chat"]));
@@ -26,6 +28,11 @@ export function App() {
       if (signal?.aborted) return;
       setError(cause instanceof ApiError ? cause.message : "Cannot reach the API server.");
     }
+    try {
+      setHealth({ kind: "ok", health: await getHealth(signal) });
+    } catch {
+      if (!signal?.aborted) setHealth({ kind: "unavailable" });
+    }
   }, []);
 
   useEffect(() => {
@@ -36,7 +43,8 @@ export function App() {
 
   // Poll while an indexing job is running, and keep retrying while the server is
   // unreachable so the page recovers on its own once the backend is up.
-  const shouldPoll = workspace?.job.state === "running" || error !== null;
+  const shouldPoll =
+    workspace?.job.state === "running" || error !== null || health.kind === "unavailable";
   useEffect(() => {
     if (!shouldPoll) return;
     const timer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
@@ -77,6 +85,7 @@ export function App() {
             </button>
           ))}
         </nav>
+        <HealthStatus view={health} />
       </header>
       <div className="layout" role="tabpanel" id="panel-chat" aria-labelledby="tab-chat" hidden={tab !== "chat"}>
         <aside className="sidebar">

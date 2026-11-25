@@ -46,6 +46,33 @@ describe("CompareColumn", () => {
     expect(out).not.toContain("compare-footer");
   });
 
+  it("draws mermaid blocks and pipe tables the same way Chat does", () => {
+    const text = [
+      "Orders are priced in `price_order`.",
+      "",
+      "```mermaid",
+      "flowchart LR",
+      '  form["OrderForm"] -->|"POST /orders"| api["create_order"]',
+      "```",
+      "",
+      "| Method | Path |",
+      "| --- | --- |",
+      "| POST | /orders |",
+    ].join("\n");
+    const out = html({ ...done, text });
+    expect(out).toContain('class="mermaid-diagram"');
+    expect(out).toContain('class="answer-table-wrap"');
+    expect(out).toContain("<table>");
+    expect(out).toContain("<th>Method</th>");
+    expect(out).toContain("<td>POST</td>");
+    expect(out).toContain("<td>/orders</td>");
+  });
+
+  it("leaves a half-streamed diagram as code until the column is done", () => {
+    const out = html({ ...done, state: "streaming", text: "```mermaid\nflowchart TD\n  a -->", usage: null });
+    expect(out).toContain('<code class="language-mermaid">flowchart TD\n  a --&gt;</code>');
+  });
+
   it("shows progress while preparing and an error message when it fails", () => {
     const preparing = { ...done, state: "preparing" as const, text: "", usage: null, setup: null, setupMessage: "Preparing endpoint metadata" };
     expect(html(preparing)).toContain("Preparing endpoint metadata…");

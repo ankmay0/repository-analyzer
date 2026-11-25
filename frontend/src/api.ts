@@ -32,6 +32,29 @@ export interface Workspace {
   job: Job;
 }
 
+/** Liveness and which optional services the server can use. Mirrors HealthOut. */
+export interface Health {
+  status: string;
+  llm_configured: boolean;
+  llm_model: string;
+  ctags_available: boolean;
+  ctags_version: string | null;
+  /** RA_GRAPH_ENABLED is on and Neo4j is reachable. */
+  graph_available: boolean;
+}
+
+export function parseHealth(value: unknown): Health {
+  const body = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  return {
+    status: String(body.status ?? "ok"),
+    llm_configured: body.llm_configured === true,
+    llm_model: String(body.llm_model ?? ""),
+    ctags_available: body.ctags_available === true,
+    ctags_version: typeof body.ctags_version === "string" ? body.ctags_version : null,
+    graph_available: body.graph_available === true,
+  };
+}
+
 export interface Source {
   repo: string;
   path: string;
@@ -81,6 +104,10 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const JSON_HEADERS = { "Content-Type": "application/json" };
+
+export async function getHealth(signal?: AbortSignal): Promise<Health> {
+  return parseHealth(await request<unknown>("/api/health", { signal }));
+}
 
 export function getWorkspace(signal?: AbortSignal): Promise<Workspace> {
   return request<Workspace>("/api/workspace", { signal });

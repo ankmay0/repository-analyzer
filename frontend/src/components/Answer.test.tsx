@@ -16,6 +16,13 @@ const ANSWER = [
   "```",
 ].join("\n");
 
+const TABLE = [
+  "| Method | Path | Handler |",
+  "| --- | --- | --- |",
+  "| POST | /orders | create_order |",
+  "| GET | /products | list_products |",
+].join("\n");
+
 describe("Answer", () => {
   it("turns mermaid blocks into diagrams and leaves other code blocks alone", () => {
     const html = renderToStaticMarkup(<Answer text={ANSWER} pending={false} />);
@@ -32,8 +39,19 @@ describe("Answer", () => {
     expect(html).toContain('<code class="language-mermaid">flowchart TD\n  a --&gt;</code>');
   });
 
-  it("renders answers without diagrams as plain markdown", () => {
-    const html = renderToStaticMarkup(<Answer text={"| a | b |\n| - | - |\n| 1 | 2 |"} pending={false} />);
+  it("renders pipe tables as HTML tables", () => {
+    const html = renderToStaticMarkup(<Answer text={TABLE} pending={false} />);
+
+    expect(html).toContain('class="answer-table-wrap"');
+    expect(html).toContain("<table>");
+    expect(html).toContain("<th>Method</th>");
+    expect(html).toContain("<th>Path</th>");
+    expect(html).toContain("<th>Handler</th>");
+    expect(html).toContain("<td>POST</td>");
+    expect(html).toContain("<td>/orders</td>");
+    expect(html).toContain("<td>create_order</td>");
+    expect(html).toContain("<td>GET</td>");
+    expect(html).toContain("<td>/products</td>");
     expect(html).not.toContain("mermaid");
   });
 });
