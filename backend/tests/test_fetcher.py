@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from repo_analyzer.errors import InvalidRepositorySourceError
-from repo_analyzer.ingestion.fetcher import RepoFetcher, parse_remote_url
+from repo_analyzer.ingestion.fetcher import RepoFetcher, parse_remote_url, remove_tree
 
 HOSTS = ("github.com",)
 
@@ -85,3 +87,14 @@ def test_local_checkout_reports_owner_commit_and_default_branch(tmp_path: Path) 
 def test_the_owner_of_a_remote_repository_comes_from_its_url() -> None:
     url, _ = parse_remote_url("https://github.com/pallets/flask.git", HOSTS)
     assert url.split("/")[-2] == "pallets"
+
+
+def test_remove_tree_deletes_read_only_files(tmp_path: Path) -> None:
+    pack = tmp_path / "repo" / ".git" / "objects" / "pack" / "pack-1.idx"
+    pack.parent.mkdir(parents=True)
+    pack.write_text("x")
+    os.chmod(pack, stat.S_IREAD)  # git writes pack files read-only; Windows rmtree refuses them
+
+    remove_tree(tmp_path / "repo")
+
+    assert not (tmp_path / "repo").exists()

@@ -12,7 +12,9 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,6 +27,30 @@ _PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _REPO_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 LOCAL_OWNER = "local"
+
+
+def remove_tree(path: Path) -> None:
+    """Delete a directory, including the read-only files git leaves in ``.git``.
+
+    On Windows ``shutil.rmtree`` refuses read-only files (git pack files are), so
+    clear the flag and retry.
+    """
+
+    def _clear_readonly(func, target, _exc):  # type: ignore[no-untyped-def]
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly)
+
+
+def _discard(path: Path) -> None:
+    try:
+        remove_tree(path)
+    except OSError:
+        logger.warning("Could not remove %s", path, exc_info=True)
 
 
 def parse_remote_url(source: str, allowed_hosts: tuple[str, ...]) -> tuple[str, str]:
@@ -122,7 +148,7 @@ class RepoFetcher:
         # removes any chance of indexing a half-updated working tree.
         self._checkouts_dir.mkdir(parents=True, exist_ok=True)
         if dest.exists():
-            shutil.rmtree(dest)
+            remove_tree(dest)
         command = [
             "git",
             "clone",
@@ -146,12 +172,12 @@ class RepoFetcher:
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            shutil.rmtree(dest, ignore_errors=True)
+            _discard(dest)
             raise RepositoryFetchError(
                 f"Cloning {url} timed out after {self._clone_timeout}s"
             ) from exc
         except subprocess.CalledProcessError as exc:
-            shutil.rmtree(dest, ignore_errors=True)
+            _discard(dest)
             detail = (exc.stderr or "").strip().splitlines()[-1:] or ["unknown git error"]
             raise RepositoryFetchError(f"Cloning {url} failed: {detail[0]}") from exc
         except FileNotFoundError as exc:
