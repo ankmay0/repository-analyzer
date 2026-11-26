@@ -336,6 +336,52 @@ attached to the log record as `chat_usage` for structured log handlers), and the
 chat UI shows them under each answer. If the client disconnects mid-answer, no
 usage event or log line is produced for that answer.
 
+## MCP server
+
+[`mcp_server.py`](backend/src/repo_analyzer/mcp_server.py) lets an AI client such as Cursor
+or Claude Desktop use the analyzer as tools. It is a [FastMCP](https://gofastmcp.com) server
+over stdio (the client starts it as a subprocess). It is one small file that calls the same
+backend objects the web API uses, so there is no second copy of the logic.
+
+| Tool | What it does |
+| --- | --- |
+| `index_repositories(repositories)` | Clones and indexes repositories (replaces the current set) and waits until done |
+| `list_repositories()` | Lists the indexed repositories |
+| `ask_question(question, thread_id)` | Asks the agent a question and returns its answer (needs `ANTHROPIC_API_KEY`) |
+| `trace_endpoint(repo, method, path)` | Traces an endpoint to its database tables (needs the Neo4j graph, `RA_GRAPH_ENABLED=true`) |
+
+It also has one resource, `info://status`, which reports whether the API key, Ctags and
+the graph are ready.
+
+Run it on Windows (PowerShell), from the `backend` folder:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[mcp]"
+copy .env.example .env      # then set ANTHROPIC_API_KEY
+python -m repo_analyzer.mcp_server
+```
+
+Use `pip install -e ".[dev]"` instead if you also want to run the tests. To connect a client,
+add this to Cursor's `.cursor/mcp.json` (or `claude_desktop_config.json` for Claude Desktop),
+with your own paths. `cwd` is the `backend` folder, so the server finds `.env` and `.data`:
+
+```json
+{
+  "mcpServers": {
+    "repository-analyzer": {
+      "command": "C:\\path\\to\\repository-analyzer\\backend\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "repo_analyzer.mcp_server"],
+      "cwd": "C:\\path\\to\\repository-analyzer\\backend"
+    }
+  }
+}
+```
+
+Then ask the client, for example: "Index https://github.com/pallets/flask, then ask how
+routing works."
+
 ## Benchmark
 
 `python -m repo_analyzer.benchmark` answers the known-answer questions in
