@@ -26,7 +26,10 @@ embeddings = ["fastembed>=0.4"]
 benchmark = ["pyyaml>=6"]
 # Neo4j code graph (RA_GRAPH_ENABLED=true).
 graph = ["neo4j>=5.20"]
+# The MCP server (python -m repo_analyzer.mcp_server).
+mcp = ["fastmcp==4.2.6"]
 dev = [
+    "fastmcp==4.2.6",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
