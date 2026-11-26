@@ -26,6 +26,7 @@ CATEGORIES = {
     "external",
     "frontend",
     "config",
+    "trace",
 }
 
 
@@ -40,7 +41,7 @@ def test_questions_file_is_well_formed(questions: dict[str, Any]) -> None:
     assert questions["version"] == 1
     assert questions["repositories"] == ["shop-api", "shop-web"]
     items = questions["questions"]
-    assert 15 <= len(items) <= 20
+    assert 15 <= len(items) <= 25
     ids = [q["id"] for q in items]
     assert len(ids) == len(set(ids)), "question ids must be unique"
     for q in items:

@@ -144,6 +144,7 @@ def build_services(
         make_model,
         needs_api_key=model_factory is None,
         embedder_factory=benchmark_embedder_factory,
+        graph_store=graph,
     )
     return Services(
         settings=settings,

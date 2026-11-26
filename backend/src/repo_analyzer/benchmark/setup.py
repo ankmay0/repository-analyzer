@@ -1,8 +1,8 @@
 """One-off preparation shared by the benchmark runner and the compare endpoint.
 
-Indexing the fixture apps, writing endpoint metadata and embedding code chunks are the
-steps some approaches need before they can answer. They live here so the two callers do
-the same thing.
+Indexing the fixture apps, writing endpoint metadata, embedding code chunks and loading
+the code graph are the steps some approaches need before they can answer. They live here
+so the two callers do the same thing.
 """
 
 from __future__ import annotations
@@ -18,12 +18,23 @@ from repo_analyzer.benchmark.approaches import ApproachUnavailableError
 from repo_analyzer.config import Settings
 from repo_analyzer.domain import SourceFile
 from repo_analyzer.ingestion.fetcher import RepoFetcher
+from repo_analyzer.ingestion.graph_extract import extract_graph
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.ingestion.metadata import MetadataStore, generate_endpoint_metadata
 from repo_analyzer.ingestion.pipeline import IndexingService
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.ingestion.scanner import scan_repository
 from repo_analyzer.retrieval.embeddings import Embedder, EmbeddingIndex, chunk_files
 from repo_analyzer.workspace import IndexedRepository, Workspace
+
+GRAPH_DISABLED = "the code graph is off (set RA_GRAPH_ENABLED=true and NEO4J_PASSWORD)"
+GRAPH_UNREACHABLE = "Neo4j is not reachable (see the server log)"
+
+
+def graph_unavailable_reason(store: GraphStore | None) -> str | None:
+    if store is None:
+        return GRAPH_DISABLED
+    return None if store.ping() else GRAPH_UNREACHABLE
 
 
 @dataclass(slots=True)
@@ -53,7 +64,7 @@ def index_fixture_repositories(
 
 
 class ApproachSetup:
-    """Builds the metadata and embeddings that ``json-metadata`` and ``json-embeddings`` need."""
+    """Builds what ``json-metadata``, ``json-embeddings`` and ``json-graph`` need."""
 
     def __init__(
         self,
@@ -121,3 +132,20 @@ class ApproachSetup:
             usage.to_dict(),
         )
         return index, cost
+
+    def build_graph(self, store: GraphStore | None, ws: str) -> SetupCost:
+        """Load every workspace repository into the code graph under ``ws``."""
+        reason = graph_unavailable_reason(store)
+        if store is None or reason is not None:
+            raise ApproachUnavailableError(reason or GRAPH_DISABLED)
+        usage = UsageTracker()
+        repositories = self._workspace.state.repositories
+        for repository in repositories:
+            records = extract_graph(self.source_files(repository.name))
+            store.sync_repo(ws, repository.name, repository.commit, records)
+        usage.finish()
+        return SetupCost(
+            "json-graph",
+            f"code graph for {len(repositories)} repositories (local parsing, no LLM tokens)",
+            usage.to_dict(),
+        )

@@ -9,13 +9,20 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from repo_analyzer.agent.service import build_chat_agent
 from repo_analyzer.benchmark import __main__ as cli
-from repo_analyzer.benchmark.approaches import APPROACHES, ApproachContext, build_approach
+from repo_analyzer.benchmark.approaches import (
+    APPROACHES,
+    ApproachContext,
+    ApproachUnavailableError,
+    build_approach,
+)
 from repo_analyzer.benchmark.grading import grade_key_facts, judge_answer
 from repo_analyzer.benchmark.questions import Question, load_questions
 from repo_analyzer.benchmark.report import write_report
 from repo_analyzer.benchmark.runner import BenchmarkConfig, BenchmarkRunner
+from repo_analyzer.benchmark.setup import GRAPH_DISABLED
 from repo_analyzer.config import Settings
-from support import FunctionChatModel, tool_call, usage
+from repo_analyzer.ingestion.graph_store import graph_workspace_key
+from support import FakeGraphStore, FunctionChatModel, tool_call, usage
 from test_embeddings import KeywordEmbedder
 
 BENCHMARKS = Path(__file__).resolve().parents[2] / "benchmarks"
@@ -86,14 +93,16 @@ def config(tmp_path: Path, **overrides: object) -> BenchmarkConfig:
         "work_dir": tmp_path / "work",
         "prompt_caching": False,
         "embedder_factory": KeywordEmbedder,
+        "graph_store": FakeGraphStore(),
     }
     values.update(overrides)
     return BenchmarkConfig(**values)  # type: ignore[arg-type]
 
 
-async def test_all_four_approaches_run_grade_and_report(tmp_path: Path) -> None:
+async def test_all_five_approaches_run_grade_and_report(tmp_path: Path) -> None:
     model = FunctionChatModel(respond=fake_model)
-    runner = BenchmarkRunner(config(tmp_path, judge=True), lambda: model)
+    graph = FakeGraphStore()
+    runner = BenchmarkRunner(config(tmp_path, judge=True, graph_store=graph), lambda: model)
 
     result = await runner.run()
 
@@ -106,10 +115,13 @@ async def test_all_four_approaches_run_grade_and_report(tmp_path: Path) -> None:
         assert (row.cache_read_tokens, row.cache_creation_tokens) == (800, 800)
         assert (row.llm_calls, row.tool_calls, row.tools_used) == (2, 1, ["list_repositories"])
         assert row.error == ""
-    assert {s.approach for s in result.setup} == {"json-metadata", "json-embeddings"}
+    assert {s.approach for s in result.setup} == {"json-metadata", "json-embeddings", "json-graph"}
+    run_ws = graph_workspace_key(tmp_path / "work" / "data")
+    assert sorted(graph.deleted) == [(run_ws, "shop-api"), (run_ws, "shop-web")]
+    assert graph.repos == {}  # the run's graph is removed when it ends
     metadata_cost = next(s for s in result.setup if s.approach == "json-metadata")
     assert metadata_cost.usage["llm_calls"] == 2  # one per repository
-    assert result.judge_usage["llm_calls"] == 12
+    assert result.judge_usage["llm_calls"] == 15
 
     # What each approach could see.
     first_calls = {}
@@ -139,10 +151,10 @@ async def test_all_four_approaches_run_grade_and_report(tmp_path: Path) -> None:
     summary = write_report(result, tmp_path / "out", {"model": "fake", "questions": 3})
     text = summary.read_text()
     assert "| chat | 3/3 | 100% | 3/3 | 2,470 (2,300 / 170) | 1.0 |" in text
-    assert "| summary-data-source | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ |" in text
+    assert "| summary-data-source | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ | 5/5 ✓ |" in text
     rows = list(csv.DictReader((tmp_path / "out" / "results.csv").open()))
-    assert len(rows) == 12 and rows[0]["total_tokens"] == "2470"
-    assert len((tmp_path / "out" / "answers.jsonl").read_text().splitlines()) == 12
+    assert len(rows) == 15 and rows[0]["total_tokens"] == "2470"
+    assert len((tmp_path / "out" / "answers.jsonl").read_text().splitlines()) == 15
     assert json.loads((tmp_path / "out" / "run.json").read_text())["summary"][0]["correct"] == 3
 
 
@@ -151,8 +163,9 @@ async def test_approaches_without_prerequisites_are_skipped_not_faked(tmp_path: 
     runner = BenchmarkRunner(
         config(
             tmp_path,
-            approaches=["chat", "json-embeddings", "tools-only"],
+            approaches=["chat", "json-embeddings", "tools-only", "json-graph"],
             embedder_factory=None,
+            graph_store=None,
             questions=QUESTIONS.questions[:1],
         ),
         lambda: model,
@@ -160,7 +173,10 @@ async def test_approaches_without_prerequisites_are_skipped_not_faked(tmp_path: 
 
     result = await runner.run()
 
-    assert result.skipped == {"json-embeddings": "no embedder configured"}
+    assert result.skipped == {
+        "json-embeddings": "no embedder configured",
+        "json-graph": GRAPH_DISABLED,
+    }
     assert [r.approach for r in result.results] == ["chat", "tools-only"]
     text = write_report(result, tmp_path / "out", {}).read_text()
     assert "| json-embeddings | skipped: no embedder configured |" in text
@@ -198,7 +214,8 @@ def test_cli_dry_run_indexes_the_fixtures_without_a_model(
     monkeypatch.chdir(tmp_path)
     assert cli.main(["--dry-run"]) == 0
     printed = capsys.readouterr().out
-    assert "questions: 19" in printed
+    assert "questions: 23" in printed
+    assert "code graph: off" in printed
     assert "approaches:" in printed and "chat" in printed
     assert "GITHUB_TOKEN" not in printed
     assert "indexed shop-api:" in printed and "indexed shop-web:" in printed
@@ -224,3 +241,24 @@ def test_chat_approach_is_the_chat_tab_agent(settings: Settings, index_store, wo
     ]
     assert "load_skill" in approach.system_prompt
     assert "indexed for you" in approach.system_prompt
+
+
+def test_json_graph_sees_the_index_and_the_graph_but_not_the_code(
+    settings: Settings, index_store, workspace
+) -> None:
+    context = ApproachContext(settings, index_store, workspace)
+    with pytest.raises(ApproachUnavailableError):
+        build_approach("json-graph", context)
+
+    context.graph_store, context.graph_ws = FakeGraphStore(), "ws"
+    approach = build_approach("json-graph", context)
+
+    assert [t.name for t in approach.tools] == [
+        "list_repositories",
+        "get_repository_info",
+        "trace_endpoint",
+        "callers_of",
+        "callees_of",
+    ]
+    assert "`trace_endpoint`" in approach.system_prompt
+    assert approach.prepare_message("q") == "q"

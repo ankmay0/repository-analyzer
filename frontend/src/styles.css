@@ -19,6 +19,7 @@
   --c-json-metadata: #8250df;
   --c-tools-only: #d97706;
   --c-json-embeddings: #0f8b8d;
+  --c-json-graph: #c2185b;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.5;
@@ -45,6 +46,7 @@
     --c-json-metadata: #b392f0;
     --c-tools-only: #f0a04b;
     --c-json-embeddings: #4fd1c5;
+    --c-json-graph: #f48fb1;
         }
 }
 
@@ -513,6 +515,10 @@ form > button {
   background: var(--c-json-embeddings);
 }
 
+[data-approach="json-graph"] .approach-swatch {
+  background: var(--c-json-graph);
+}
+
 /* --- Compare page ------------------------------------------------------------ */
 
 .compare {
@@ -611,6 +617,10 @@ form > button {
 
 .compare-column[data-approach="json-embeddings"] {
   border-top-color: var(--c-json-embeddings);
+}
+
+.compare-column[data-approach="json-graph"] {
+  border-top-color: var(--c-json-graph);
 }
 
 .compare-column > header {

@@ -5,7 +5,7 @@ Known-answer test apps and questions for comparing how Repository Analyzer answe
 - `fixtures/shop-api/`: FastAPI + PostgreSQL backend for customers, orders and fulfillment
   (migrations, pricing, an in-process cache, an external carrier API).
 - `fixtures/shop-web/`: React + TypeScript front end that calls it.
-- `questions.yaml`: 19 questions with a reference answer, key facts for automatic
+- `questions.yaml`: 23 questions with a reference answer, key facts for automatic
   grading, and the files that prove each answer.
 
 The fixtures are not meant to run in production; they exist so every answer can be
@@ -22,7 +22,7 @@ cd backend
 pip install -e ".[dev,benchmark,embeddings]"   # embeddings: fastembed, a local ONNX model
 export ANTHROPIC_API_KEY=...                    # required; nothing runs without it
 python -m repo_analyzer.benchmark --dry-run     # check the setup, index the fixtures, no model calls
-python -m repo_analyzer.benchmark               # all 19 questions x 4 approaches
+python -m repo_analyzer.benchmark               # all 23 questions x 5 approaches
 python -m repo_analyzer.benchmark --approach tools-only --only order-pricing --judge
 ```
 
@@ -34,13 +34,14 @@ Output goes to `benchmarks/results/<timestamp>/` (git-ignored):
 - `results.csv`: one row per question and approach;
 - `answers.jsonl`: the full answers, missing facts and tools used;
 - `run.json`: model, settings, skipped approaches and the summary;
-- `work/`: the fixture indexes, the endpoint metadata and the embeddings built for the run.
+- `work/`: the fixture indexes, the endpoint metadata and the embeddings built for the run
+  (the run's code graph lives in Neo4j and is deleted at the end).
 
 ### The approaches
 
 Every approach uses the same model (`RA_LLM_MODEL`) and a fresh conversation per
 question. `chat` is the Chat tab's agent: the same tools, skills and system prompt,
-pointed at the local fixture checkouts. The other three use the same core rules (cite
+pointed at the local fixture checkouts. The other four use the same core rules (cite
 `repo/path:line`, say when unsupported) and leave skills out so they are not given
 instructions written for another approach's tools.
 
@@ -50,6 +51,7 @@ instructions written for another approach's tools.
 | `json-metadata` | `list_repositories`, `get_repository_info`, `get_endpoint_metadata` | Before the questions, the model is asked once per repository to describe every endpoint and client call (data source, source types, tables, caching, transformations, side effects, external calls, location). The cost is reported as setup tokens. |
 | `tools-only` | `list_repositories`, `list_files`, `search_code`, `read_file` | No JSON index. |
 | `json-embeddings` | `list_repositories`, `get_repository_info`, `semantic_search` | Files are split into 60-line chunks (15 overlap) and embedded with `BAAI/bge-small-en-v1.5` via fastembed. The top `--top-k` (8) chunks are added to each question. Skipped if fastembed is not installed. |
+| `json-graph` | `list_repositories`, `get_repository_info`, `trace_endpoint`, `callers_of`, `callees_of` | Before the questions, the fixtures are parsed into the Neo4j code graph (endpoint, functions, calls, tables) under the run's own namespace, which is deleted when the run ends. No code access: it can name the path and the tables but not what the code computes. Skipped unless `RA_GRAPH_ENABLED=true` and Neo4j is reachable. |
 
 The JSON index and the file tools both use the local fixture folders. No GitHub
 token is required.
@@ -79,12 +81,14 @@ end with a fake model and a keyword embedder
 
 Start the backend and the frontend as usual (see the main README) and open the
 **Compare** tab. Ask a free-form question about the fixture apps (or an indexed
-repository) and the four approaches answer side by side. It needs the same things
+repository) and the five approaches answer side by side. It needs the same things
 as the command line tool:
 
 - `ANTHROPIC_API_KEY` in the backend environment, or the page shows an error and Compare
   is disabled;
-- `pip install -e ".[embeddings]"` for `json-embeddings`.
+- `pip install -e ".[embeddings]"` for `json-embeddings`;
+- `pip install -e ".[graph]"`, `RA_GRAPH_ENABLED=true`, `NEO4J_PASSWORD` and a running
+  Neo4j for `json-graph`.
 
 Approaches that are missing something appear greyed out, with the reason (the same
 information is at `GET /api/compare/status`). The backend must be started from a source

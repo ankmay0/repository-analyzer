@@ -340,7 +340,7 @@ usage event or log line is produced for that answer.
 
 `python -m repo_analyzer.benchmark` answers the known-answer questions in
 [`benchmarks/questions.yaml`](benchmarks/questions.yaml) about the fixture apps in
-`benchmarks/fixtures/`, under four approaches, and records correctness, tokens and
+`benchmarks/fixtures/`, under five approaches, and records correctness, tokens and
 latency. See [`benchmarks/README.md`](benchmarks/README.md).
 
 | Approach | What the agent gets |
@@ -349,6 +349,7 @@ latency. See [`benchmarks/README.md`](benchmarks/README.md).
 | `json-metadata` | Ctags JSON index + per-endpoint metadata written by the model at index time; no code access |
 | `tools-only` | No index: list, search and read the checkout |
 | `json-embeddings` | Ctags JSON index + top-k similar code chunks from a local embeddings store; no code access |
+| `json-graph` | Ctags JSON index + the Neo4j code graph (`trace_endpoint`, `callers_of`, `callees_of`); no code access. Needs `RA_GRAPH_ENABLED=true` and a reachable Neo4j |
 
 ## Tests
 
@@ -402,12 +403,13 @@ so no Neo4j is needed; the one Neo4j round-trip test runs only when `RA_TEST_NEO
 
 ### Compare tab
 
-The **Compare** tab answers one free-form question under all four approaches at the
+The **Compare** tab answers one free-form question under all five approaches at the
 same time and shows the answers side by side. Pick a repository (an indexed one, or the
 benchmark fixtures), type a question and press Compare. Each column streams its own
 answer, with a footer showing total, input, output and cached tokens, latency and tool
 calls; the column with the fewest tokens and the fastest one are marked. An approach
-that cannot run (for example `json-embeddings` without fastembed) appears greyed
+that cannot run (for example `json-embeddings` without fastembed, or `json-graph` with the
+code graph off) appears greyed
 out with the reason. On narrow screens the columns stack. The
 questions asked in the session are listed underneath and can be reopened.
 

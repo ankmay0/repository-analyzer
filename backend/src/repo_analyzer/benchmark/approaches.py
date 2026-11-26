@@ -1,4 +1,4 @@
-"""The four approaches compared by the benchmark and the Compare tab.
+"""The five approaches compared by the benchmark and the Compare tab.
 
 Every approach gets the same model and a fresh conversation per question; they
 differ in what the agent can look at:
@@ -8,6 +8,8 @@ differ in what the agent can look at:
 ``tools-only``       no index: list, search and read the local checkout
 ``json-embeddings``  Ctags JSON index + top-k code chunks from an embeddings store,
                      no repository access
+``json-graph``       Ctags JSON index + the Neo4j code graph (endpoint -> functions ->
+                     tables), no repository access
 
 The last three keep skills out of the prompt so they are not given instructions
 written for another approach's tools. ``chat`` uses the Chat tab's prompt and skills
@@ -25,11 +27,13 @@ from langchain_core.tools import BaseTool
 from repo_analyzer.agent.service import ChatService, chat_agent_tools_and_prompt
 from repo_analyzer.agent.skills import SkillLibrary
 from repo_analyzer.agent.tools import (
+    build_graph_tools,
     build_list_files_tool,
     build_metadata_tool,
     build_tools,
 )
 from repo_analyzer.config import Settings
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.retrieval.embeddings import (
@@ -39,7 +43,7 @@ from repo_analyzer.retrieval.embeddings import (
 )
 from repo_analyzer.workspace import Workspace
 
-APPROACHES = ("chat", "json-metadata", "tools-only", "json-embeddings")
+APPROACHES = ("chat", "json-metadata", "tools-only", "json-embeddings", "json-graph")
 
 # Shown in the Compare tab: ``label`` is the column heading, ``summary`` the one-line description.
 APPROACH_LABELS = {
@@ -47,12 +51,15 @@ APPROACH_LABELS = {
     "json-metadata": "json-metadata",
     "tools-only": "tools-only",
     "json-embeddings": "json-embeddings",
+    "json-graph": "json-graph",
 }
 APPROACH_SUMMARIES = {
     "chat": "The same agent as the Chat tab: JSON index, local file tools and skills",
     "json-metadata": "Ctags JSON index + per-endpoint metadata written once; no code access",
     "tools-only": "No index: the model lists, searches and reads files itself",
     "json-embeddings": "Ctags JSON index + the top-k most similar code chunks; no code access",
+    "json-graph": "Ctags JSON index + Neo4j code graph (endpoint to functions to tables); "
+    "no code access",
 }
 
 CORE_RULES = """\
@@ -95,6 +102,16 @@ dependencies, functions, classes and imports with line numbers), and `semantic_s
 finds the code chunks most similar in meaning to a query. The question already comes \
 with the most similar chunks; search again with different words if they are not \
 enough.""",
+    "json-graph": """\
+You cannot read the source code. Your tools: `list_repositories` and \
+`get_repository_info` give each repository's Ctags JSON index (file tree, declared \
+dependencies, functions, classes and imports with line numbers). A code graph built from \
+the code gives the rest: `trace_endpoint` follows an HTTP endpoint from its handler \
+through the functions it calls to the database tables they read and write, and \
+`callers_of` / `callees_of` walk the calls of one function. For a question about an \
+endpoint, start with `trace_endpoint`. Cite the `repo/path:start-end` ranges the tools \
+give. The graph shows which functions and tables are involved, not what the code \
+computes: say so when the question needs that detail.""",
 }
 
 
@@ -117,6 +134,8 @@ class ApproachContext:
     workspace: Workspace
     metadata_store: MetadataStore | None = None
     embedding_index: EmbeddingIndex | None = None
+    graph_store: GraphStore | None = None
+    graph_ws: str = ""
     top_k: int = 8
 
 
@@ -162,6 +181,12 @@ def build_approach(name: str, context: ApproachContext) -> Approach:
             local["read_file"],
         ]
         return Approach(name, tools, prompt)
+
+    if name == "json-graph":
+        if context.graph_store is None:
+            raise ApproachUnavailableError("the code graph is not enabled")
+        graph_tools = build_graph_tools(context.graph_store, context.workspace, context.graph_ws)
+        return Approach(name, [*index_tools, *graph_tools], prompt)
 
     if context.embedding_index is None:
         raise ApproachUnavailableError("the embeddings extra is not installed")

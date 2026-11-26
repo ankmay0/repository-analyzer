@@ -561,7 +561,7 @@ version: 1
 repositories: [shop-api, shop-web]       # folders under benchmarks/fixtures/
 questions:
   - id: summary-data-source              # stable identifier
-    category: data-source                # data-source | caching | schema | flow | transformation | external | frontend | config
+    category: data-source                # data-source | caching | schema | flow | transformation | external | frontend | config | trace
     question: Where does the GET /customers/{customer_id}/summary endpoint get its data from?
     expected_answer: >-
       It runs one aggregate SQL query on the PostgreSQL `orders` table …
@@ -577,10 +577,10 @@ Loaded into `Question(id, category, question, expected_answer, key_facts, eviden
 | Type | Fields |
 | --- | --- |
 | `Approach` | `name`, `tools: list[BaseTool]`, `system_prompt`, `prepare_message(question) -> str` (identity except `json-embeddings`, which appends a `<retrieved_code>` block) |
-| `ApproachContext` (mutable) | `settings`, `index_store`, `workspace`, `metadata_store?`, `embedding_index?`, `top_k = 8` |
+| `ApproachContext` (mutable) | `settings`, `index_store`, `workspace`, `metadata_store?`, `embedding_index?`, `graph_store?`, `graph_ws = ""`, `top_k = 8` |
 | `SetupCost` (mutable) | `approach`, `description`, `usage: dict[str, int]` (UsageTracker dict) |
 
-`APPROACHES = ("chat", "json-metadata", "tools-only", "json-embeddings")`.
+`APPROACHES = ("chat", "json-metadata", "tools-only", "json-embeddings", "json-graph")`.
 
 ### Grading
 
@@ -616,7 +616,7 @@ Output directory `benchmarks/results/<YYYYmmdd-HHMMSS>/`:
 | Type | Fields |
 | --- | --- |
 | `CompareRequest` | `question`, `repository = "benchmark-fixtures"`, `approaches: list[str] \| None` |
-| `CompareTarget` (mutable, cached) | `key`, `label`, `settings`, `index_store`, `workspace`, `setup: ApproachSetup`, `metadata_store?`, `embedding_index?`, `lock` |
+| `CompareTarget` (mutable, cached) | `key`, `label`, `settings`, `index_store`, `workspace`, `setup: ApproachSetup`, `metadata_store?`, `embedding_index?`, `graph_ws?` (set once the graph is loaded), `lock` |
 
 Target keys: `"fixtures"`, or `"<name>@<commit or index_file>"` for an indexed repo.
 
@@ -634,7 +634,10 @@ Target keys: `"fixtures"`, or `"<name>@<commit or index_file>"` for an indexed r
   "approaches": [
     { "name": "json-embeddings", "label": "json-embeddings",
       "summary": "Ctags JSON index + the top-k most similar code chunks; no code access",
-      "available": false, "reason": "fastembed is not installed (pip install -e \".[embeddings]\")" }
+      "available": false, "reason": "fastembed is not installed (pip install -e \".[embeddings]\")" },
+    { "name": "json-graph", "label": "json-graph",
+      "summary": "Ctags JSON index + Neo4j code graph (endpoint to functions to tables); no code access",
+      "available": false, "reason": "the code graph is off (set RA_GRAPH_ENABLED=true and NEO4J_PASSWORD)" }
   ]
 }
 ```

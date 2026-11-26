@@ -19,7 +19,8 @@ from repo_analyzer.benchmark import service as benchmark_service
 from repo_analyzer.benchmark.approaches import APPROACHES
 from repo_analyzer.benchmark.compare import FIXTURES_ID
 from repo_analyzer.config import Settings
-from support import FunctionChatModel, tool_call, usage
+from repo_analyzer.ingestion.graph_store import graph_workspace_key
+from support import FakeGraphStore, FunctionChatModel, tool_call, usage
 from test_benchmark import BENCHMARKS
 from test_embeddings import KeywordEmbedder
 
@@ -56,8 +57,10 @@ INPUT_TOKENS = {
     "json-metadata": 1500,
     "tools-only": 9000,
     "json-embeddings": 2500,
+    "json-graph": 2000,
 }
-MARKERS = {
+MARKERS = {  # first match wins: json-graph's prompt also says it cannot read the source
+    "A code graph built from the code": "json-graph",
     "indexed for you": "chat",
     "You cannot read the source code": "json-metadata",
     "There is no index": "tools-only",
@@ -101,12 +104,19 @@ class Script:
         )
 
 
-def make_app(settings: Settings, script: Script, *, embedder: bool = True) -> FastAPI:
+def make_app(
+    settings: Settings,
+    script: Script,
+    *,
+    embedder: bool = True,
+    graph: FakeGraphStore | None = None,
+) -> FastAPI:
     model = FunctionChatModel(respond=script)
     return create_app(
-        settings,
+        settings.model_copy(update={"graph_enabled": True}),
         model_factory=lambda: model,
         benchmark_embedder_factory=KeywordEmbedder if embedder else None,
+        graph_store=graph or FakeGraphStore(),
     )
 
 
@@ -155,6 +165,7 @@ async def test_status_explains_what_cannot_run(
     assert reasons["chat"] is None and reasons["json-metadata"] is None
     assert reasons["tools-only"] is None
     assert "fastembed" in reasons["json-embeddings"]
+    assert "RA_GRAPH_ENABLED" in reasons["json-graph"]
     assert refused.status_code == 503
     assert "ANTHROPIC_API_KEY" in refused.json()["detail"]
 
@@ -187,6 +198,7 @@ async def test_every_approach_streams_its_answer_and_usage(client: httpx.AsyncCl
     setup = {n: next(e for e in grouped[n] if e["type"] == "usage")["setup"] for n in APPROACHES}
     assert setup["json-metadata"]["total_tokens"] == 2 * 5300  # one model call per fixture app
     assert setup["json-embeddings"]["total_tokens"] == 0
+    assert setup["json-graph"]["total_tokens"] == 0
     assert setup["tools-only"] is None and setup["chat"] is None
 
 
@@ -202,12 +214,12 @@ async def test_setup_is_paid_once_and_reused_for_the_next_question(tmp_path: Pat
 
 
 async def test_approaches_run_concurrently(tmp_path: Path) -> None:
-    # All four first model calls must be waiting at once for the barrier to open.
-    async for http in client_for(make_app(make_settings(tmp_path), Script(rendezvous=4))):
+    # All five first model calls must be waiting at once for the barrier to open.
+    async for http in client_for(make_app(make_settings(tmp_path), Script(rendezvous=5))):
         events = await ask(http)
 
     assert not any(data["type"] == "error" for _, data in events if "type" in data)
-    assert [k for k, _ in events].count("usage") == 4
+    assert [k for k, _ in events].count("usage") == 5
 
 
 async def test_unavailable_approaches_are_reported_and_the_rest_still_run(
@@ -224,7 +236,34 @@ async def test_unavailable_approaches_are_reported_and_the_rest_still_run(
     assert plan["chat"]["available"] is True
     grouped = by_approach(events)
     assert "json-embeddings" not in grouped
-    assert set(grouped) == {"chat", "json-metadata", "tools-only"}
+    assert set(grouped) == {"chat", "json-metadata", "tools-only", "json-graph"}
+
+
+async def test_json_graph_loads_the_fixtures_into_their_own_graph_namespace(
+    tmp_path: Path,
+) -> None:
+    graph = FakeGraphStore()
+    settings = make_settings(tmp_path)
+    async for http in client_for(make_app(settings, Script(), graph=graph)):
+        grouped = by_approach(await ask(http, approaches=["json-graph"]))
+
+    fixtures_ws = graph_workspace_key(settings.data_dir / "compare" / "fixtures")
+    assert {repo for ws, repo in graph.repos if ws == fixtures_ws} == {"shop-api", "shop-web"}
+    assert graph.trace_endpoint(fixtures_ws, "shop-api", "POST", "/orders") is not None
+    assert grouped["json-graph"][0] == {
+        "type": "setup", "approach": "json-graph", "message": "Loading the code graph",
+    }  # fmt: skip
+
+
+async def test_json_graph_is_unavailable_when_neo4j_is_down(tmp_path: Path) -> None:
+    app = make_app(make_settings(tmp_path), Script(), graph=FakeGraphStore(reachable=False))
+    async for http in client_for(app):
+        events = await ask(http, approaches=["json-graph", "tools-only"])
+
+    plan = {a["name"]: a for a in events[0][1]["approaches"]}
+    assert plan["json-graph"]["available"] is False
+    assert "not reachable" in plan["json-graph"]["reason"]
+    assert set(by_approach(events)) == {"tools-only"}
 
 
 async def test_one_failing_approach_does_not_stop_the_others(tmp_path: Path) -> None:

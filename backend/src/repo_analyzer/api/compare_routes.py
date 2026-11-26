@@ -26,7 +26,7 @@ class CompareIn(BaseModel):
         description=f"An indexed repository's name, or {FIXTURES_ID!r} for the benchmark fixtures.",
     )
     approaches: list[str] | None = Field(
-        default=None, description="Subset of approaches; all four when omitted."
+        default=None, description="Subset of approaches; all five when omitted."
     )
 
 

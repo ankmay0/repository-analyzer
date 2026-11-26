@@ -23,6 +23,7 @@ from repo_analyzer.benchmark.questions import load_questions
 from repo_analyzer.benchmark.report import write_report
 from repo_analyzer.benchmark.runner import BenchmarkConfig, BenchmarkRunner
 from repo_analyzer.config import Settings, default_benchmarks_dir
+from repo_analyzer.ingestion.graph_store import GraphStore, Neo4jGraphStore
 from repo_analyzer.retrieval.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingsUnavailableError,
@@ -52,7 +53,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--approach", action="append", choices=APPROACHES, dest="approaches",
-        help="Approach to run (repeatable). Default: all four.",
+        help="Approach to run (repeatable). Default: all five.",
     )  # fmt: skip
     parser.add_argument("--questions", type=Path, default=benchmarks / "questions.yaml")
     parser.add_argument("--fixtures", type=Path, default=benchmarks / "fixtures")
@@ -99,6 +100,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if fastembed_available()
         else 'missing (json-embeddings will be skipped; pip install -e ".[embeddings]")',
         "model": settings.llm_model,
+        "code graph": f"enabled ({settings.neo4j_uri})"
+        if settings.graph_enabled
+        else "off (json-graph will be skipped; set RA_GRAPH_ENABLED=true)",
     }
     for key, value in plan.items():
         print(f"{key}: {value}")
@@ -133,12 +137,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     def embedder() -> FastEmbedEmbedder:
         return FastEmbedEmbedder(args.embedding_model)
 
+    graph_store: GraphStore | None = None
+    if settings.graph_enabled and "json-graph" in approaches:
+        graph_store = Neo4jGraphStore.from_settings(settings)  # unreachable -> skipped by ping
     config = BenchmarkConfig(
         settings=settings,
         fixtures_dir=args.fixtures,
         repositories=question_set.repositories,
         questions=questions,
         work_dir=out_dir / "work",
+        graph_store=graph_store,
         approaches=approaches,
         judge=args.judge,
         top_k=args.top_k,
@@ -149,6 +157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except EmbeddingsUnavailableError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    finally:
+        if graph_store is not None:
+            graph_store.close()
     run_info: dict[str, Any] = {
         "started_at": started.isoformat(timespec="seconds"),
         "model": settings.llm_model,

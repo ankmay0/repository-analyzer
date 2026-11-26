@@ -36,6 +36,7 @@ from repo_analyzer.errors import (
     InvalidBenchmarkRequestError,
     LLMNotConfiguredError,
 )
+from repo_analyzer.ingestion.graph_store import GraphStore, graph_workspace_key
 from repo_analyzer.ingestion.metadata import MetadataStore
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.retrieval.embeddings import EmbeddingIndex
@@ -67,6 +68,7 @@ class CompareTarget:
     setup: ApproachSetup
     metadata_store: MetadataStore | None = None
     embedding_index: EmbeddingIndex | None = None
+    graph_ws: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def ensure_metadata(self) -> tuple[MetadataStore, SetupCost | None]:
@@ -84,6 +86,16 @@ class CompareTarget:
                 return self.embedding_index, None
             self.embedding_index, cost = self.setup.build_embeddings()
             return self.embedding_index, cost
+
+    def ensure_graph(self, store: GraphStore | None) -> tuple[str, SetupCost | None]:
+        """Load the target's repositories into the code graph once, in its own namespace."""
+        with self.lock:
+            if self.graph_ws is not None:
+                return self.graph_ws, None
+            ws = graph_workspace_key(self.settings.data_dir)
+            cost = self.setup.build_graph(store, ws)
+            self.graph_ws = ws
+            return ws, cost
 
 
 def _token_usage(cost: SetupCost | None) -> dict[str, Any] | None:
@@ -297,6 +309,11 @@ class CompareService:
             elif name == "json-embeddings":
                 emit("setup", message="Preparing code embeddings")
                 context.embedding_index, cost = await asyncio.to_thread(target.ensure_embeddings)
+            elif name == "json-graph":
+                emit("setup", message="Loading the code graph")
+                store = self._benchmark.graph_store
+                context.graph_ws, cost = await asyncio.to_thread(target.ensure_graph, store)
+                context.graph_store = store
             approach = build_approach(name, context)
             chat = build_chat_service(
                 approach,

@@ -56,7 +56,7 @@
     <div class="chips">
       <span class="chip">Chat tab: index repos, ask questions, see tokens per answer</span>
       <span class="chip">Answers draw Mermaid diagrams</span>
-      <span class="chip">Compare tab: one question, four approaches side by side</span>
+      <span class="chip">Compare tab: one question, five approaches side by side</span>
     </div>
   </div>
 
@@ -170,7 +170,7 @@
       <h3>Compare: "How is an order priced?"</h3>
       <ol>
         <li>The Compare tab sends one question to <code>/api/compare</code></li>
-        <li>Four approaches answer at once: the Chat agent, JSON + endpoint metadata, tools only, JSON + embeddings</li>
+        <li>Five approaches answer at once: the Chat agent, JSON + endpoint metadata, tools only, JSON + embeddings, JSON + code graph (when Neo4j is on)</li>
         <li>Each column streams its answer with tokens, latency and tool calls</li>
         <li>For graded runs over the known-answer questions use <code>python -m repo_analyzer.benchmark</code></li>
       </ol>

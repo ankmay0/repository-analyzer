@@ -3,6 +3,7 @@
 # Index both fixtures (shop-api and shop-web) before asking. Each question has:
 #   id               stable identifier
 #   category         data-source | caching | schema | flow | transformation | external | frontend | config
+#                    | trace (one endpoint from route handler to tables; the code graph covers the path)
 #   question         what to ask the analyzer, verbatim
 #   expected_answer  a reference answer written from the code
 #   key_facts        facts a correct answer must contain. Grading is case-insensitive
@@ -345,3 +346,84 @@ questions:
     evidence:
       - shop-api/migrations/002_fulfillments.sql
       - shop-api/app/routers/customers.py
+
+  - id: trace-customer-summary
+    category: trace
+    question: Trace GET /customers/{customer_id}/summary from its route handler to the database. Which functions run, in what order, which tables do they touch, and how is the response shaped?
+    expected_answer: >-
+      get_customer_summary (app/routers/customers.py) calls cached() from app/cache.py
+      with key customer-summary:{id} and a 60 second TTL; on a miss the lambda calls
+      _load_summary, which opens connection() and reads the orders table (count, sum of
+      total_cents, max created_at for status paid or fulfilled). cents_to_dollars turns
+      lifetime_cents into lifetime_value.
+    key_facts:
+      - "get_customer_summary"
+      - "cached"
+      - "_load_summary"
+      - "orders"
+      - "cents_to_dollars"
+      - "paid"
+    evidence:
+      - shop-api/app/routers/customers.py
+      - shop-api/app/cache.py
+      - shop-api/app/services/pricing.py
+
+  - id: trace-create-order
+    category: trace
+    question: Trace POST /orders from its route handler to the database. Which functions does it call and which tables does it read and write?
+    expected_answer: >-
+      create_order (app/routers/orders.py) reads customers (tier) and products (price
+      and stock, locked FOR UPDATE), calls price_order to compute the totals, inserts
+      into orders and order_items, decrements products.stock_quantity, then calls
+      invalidate("products:") and returns to_order(...), which uses cents_to_dollars.
+    key_facts:
+      - "create_order"
+      - "price_order"
+      - "customers"
+      - "order_items"
+      - "invalidate"
+      - "stock_quantity"
+    evidence:
+      - shop-api/app/routers/orders.py
+      - shop-api/app/services/pricing.py
+      - shop-api/app/cache.py
+
+  - id: trace-list-products
+    category: trace
+    question: Trace GET /products from its route handler to the database, including how each row becomes the API response.
+    expected_answer: >-
+      list_products passes _load_active_products to cached() under key products:active
+      (300 second TTL). On a miss _load_active_products reads the products table (active
+      rows ordered by name) and maps each row to a Product: price via cents_to_dollars
+      and in_stock = stock_quantity > 0.
+    key_facts:
+      - "list_products"
+      - "_load_active_products"
+      - "products"
+      - "cents_to_dollars"
+      - "in_stock"
+    evidence:
+      - shop-api/app/routers/products.py
+      - shop-api/app/cache.py
+      - shop-api/app/services/pricing.py
+
+  - id: trace-fulfill-order
+    category: trace
+    question: Trace POST /orders/{order_id}/fulfill from its route handler to the database and external calls. Which functions and tables are involved?
+    expected_answer: >-
+      fulfill_order (app/routers/fulfillment.py) reads the order from orders (FOR
+      UPDATE) and the parcel count from order_items, calls book_shipment in
+      app/services/carrier.py, inserts a row into fulfillments, updates orders to
+      fulfilled and calls invalidate for the customer's summary. A carrier failure
+      returns 502 and writes nothing.
+    key_facts:
+      - "fulfill_order"
+      - "book_shipment"
+      - "order_items"
+      - "fulfillments"
+      - "invalidate"
+      - "502"
+    evidence:
+      - shop-api/app/routers/fulfillment.py
+      - shop-api/app/services/carrier.py
+      - shop-api/app/cache.py

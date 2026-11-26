@@ -94,10 +94,10 @@ Entry points:
 │   services.py     build_services(): the composition root                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ benchmark/        Compare tab + CLI benchmark (uses ingestion, agent, retrieval)
-│   approaches.py   4 approaches: tools + system prompt per approach            │
+│   approaches.py   5 approaches: tools + system prompt per approach            │
 │   compare.py      CompareService: one question, all approaches, concurrently │
 │   runner.py       BenchmarkRunner: every question × every approach, graded   │
-│   setup.py        index fixtures, generate metadata, build embeddings        │
+│   setup.py        index fixtures, metadata, embeddings, code graph           │
 │   grading.py      key-fact matching, optional LLM judge                      │
 │   questions.py    load benchmarks/questions.yaml                             │
 │   report.py       summary.md, results.csv, answers.jsonl, run.json           │
@@ -401,7 +401,7 @@ unaffected.
 
 ## 8. Benchmark and Compare
 
-Both answer questions under four **approaches** that share the model and core citation
+Both answer questions under five **approaches** that share the model and core citation
 rules but differ in what the agent can see
 ([`benchmark/approaches.py`](../src/repo_analyzer/benchmark/approaches.py)):
 
@@ -411,23 +411,25 @@ rules but differ in what the agent can see
 | `json-metadata` | `list_repositories`, `get_repository_info`, `get_endpoint_metadata` | `CORE_RULES` + approach text | Endpoint metadata: 1 model call per repo |
 | `tools-only` | `list_repositories`, `list_files`, `search_code`, `read_file` | `CORE_RULES` + approach text | none |
 | `json-embeddings` | `list_repositories`, `get_repository_info`, `semantic_search` | `CORE_RULES` + approach text; top-k chunks appended to the question | Chunk + embed all files locally (needs `fastembed`) |
+| `json-graph` | `list_repositories`, `get_repository_info`, `trace_endpoint`, `callers_of`, `callees_of` | `CORE_RULES` + approach text | Extract + `sync_repo` every repo into Neo4j under the run's or target's own `ws` (needs the graph on and Neo4j reachable; no LLM tokens) |
 
 Each approach gets its own `ChatService` (fresh in-memory history).
 
 | | CLI benchmark | Compare (web) |
 | --- | --- | --- |
 | Entry | `python -m repo_analyzer.benchmark` | `POST /api/compare`, Compare tab |
-| Questions | All of `benchmarks/questions.yaml` (19), or `--only` / `--limit` | One free-form question |
+| Questions | All of `benchmarks/questions.yaml` (23), or `--only` / `--limit` | One free-form question |
 | Repositories | `benchmarks/fixtures/` (`shop-api`, `shop-web`) | Fixtures, or one indexed workspace repo |
 | Execution | Approaches sequentially, questions sequentially | Approaches concurrently, events merged via a queue |
 | Grading | Key-fact substring match; optional `--judge` LLM | none (side-by-side reading) |
 | Output | `benchmarks/results/<timestamp>/` files | SSE stream |
 | Data dir | `<out>/work/data` | `<data_dir>/compare/…` |
-| Caching | none across runs | Prepared targets (index, metadata, embeddings) cached in memory per process |
+| Caching | none across runs; the run's graph `ws` is deleted from Neo4j at the end | Prepared targets (index, metadata, embeddings, graph `ws`) cached in memory per process |
 
 Supporting modules: `setup.py` (index fixtures with `allow_local_paths=True`, generate
-metadata, build embeddings), `service.py` (`BenchmarkService`: API-key check, fixture
-discovery, which approaches can run), `grading.py`, `questions.py`, `report.py`,
+metadata, build embeddings, load the code graph; `graph_unavailable_reason`),
+`service.py` (`BenchmarkService`: API-key check, fixture discovery, which approaches can
+run; holds the app's `graph_store`), `grading.py`, `questions.py`, `report.py`,
 `runner.py`, `compare.py`. Details in [dataflow.md §4–5](dataflow.md#4-compare-flow).
 
 ---

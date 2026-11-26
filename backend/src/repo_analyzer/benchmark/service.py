@@ -12,8 +12,10 @@ from collections.abc import Callable
 from langchain_core.language_models import BaseChatModel
 
 from repo_analyzer.benchmark.questions import QuestionSet, load_questions
+from repo_analyzer.benchmark.setup import graph_unavailable_reason
 from repo_analyzer.config import Settings
 from repo_analyzer.errors import BenchmarkUnavailableError, InvalidBenchmarkRequestError
+from repo_analyzer.ingestion.graph_store import GraphStore
 from repo_analyzer.retrieval.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
     Embedder,
@@ -32,11 +34,13 @@ class BenchmarkService:
         *,
         needs_api_key: bool = True,
         embedder_factory: Callable[[], Embedder] | None = None,
+        graph_store: GraphStore | None = None,
     ) -> None:
         self._settings = settings
         self._model_factory = model_factory
         self._needs_api_key = needs_api_key
         self._embedder_factory = embedder_factory
+        self.graph_store = graph_store
 
     @property
     def llm_configured(self) -> bool:
@@ -75,6 +79,8 @@ class BenchmarkService:
             and not fastembed_available()
         ):
             return NO_FASTEMBED
+        if approach == "json-graph":
+            return graph_unavailable_reason(self.graph_store)
         return None
 
     def question_set(self) -> QuestionSet:

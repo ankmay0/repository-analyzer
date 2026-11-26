@@ -23,6 +23,7 @@ from repo_analyzer.benchmark.grading import grade_key_facts, judge_answer
 from repo_analyzer.benchmark.questions import Question
 from repo_analyzer.benchmark.setup import ApproachSetup, SetupCost, index_fixture_repositories
 from repo_analyzer.config import Settings
+from repo_analyzer.ingestion.graph_store import GraphStore, graph_workspace_key
 from repo_analyzer.ingestion.repo_index import RepoIndexStore
 from repo_analyzer.retrieval.embeddings import Embedder
 from repo_analyzer.workspace import IndexedRepository, Workspace
@@ -78,6 +79,7 @@ class BenchmarkConfig:
     top_k: int = 8
     prompt_caching: bool = True
     embedder_factory: Callable[[], Embedder] | None = None
+    graph_store: GraphStore | None = None  # json-graph is skipped without one
     # Called with {"type": ..., ...} as the run advances: approach_setup, approach_started,
     # approach_skipped, question_started and result. Used by the web UI for live progress.
     on_progress: ProgressCallback | None = None
@@ -124,10 +126,33 @@ class BenchmarkRunner:
             top_k=self._config.top_k,
         )
         judge_usage = UsageTracker()
+        try:
+            await self._run_approaches(result, context, judge_usage)
+        finally:
+            self._drop_graph(context.graph_ws)
 
+        if self._config.judge:
+            judge_usage.finish()
+            result.judge_usage = judge_usage.to_dict()
+        return result
+
+    def _drop_graph(self, ws: str) -> None:
+        """The run's graph is scratch data: remove it from Neo4j when the run ends."""
+        store = self._config.graph_store
+        if not ws or store is None:
+            return
+        for repository in self._workspace.state.repositories:
+            try:
+                store.delete_repo(ws, repository.name)
+            except Exception:
+                logger.warning("Could not remove %s from the code graph", repository.name)
+
+    async def _run_approaches(
+        self, result: BenchmarkResult, context: ApproachContext, judge_usage: UsageTracker
+    ) -> None:
         for name in self._config.approaches:
             try:
-                if name in ("json-metadata", "json-embeddings"):
+                if name in ("json-metadata", "json-embeddings", "json-graph"):
                     self._emit({"type": "approach_setup", "approach": name})
                 if name == "json-metadata":
                     context.metadata_store, cost = self._setup.generate_metadata()
@@ -137,6 +162,10 @@ class BenchmarkRunner:
                         self._config.work_dir / "embeddings.json"
                     )
                     result.setup.append(cost)
+                if name == "json-graph":
+                    ws = graph_workspace_key(self._settings.data_dir)
+                    result.setup.append(self._setup.build_graph(self._config.graph_store, ws))
+                    context.graph_store, context.graph_ws = self._config.graph_store, ws
                 approach = build_approach(name, context)
             except ApproachUnavailableError as exc:
                 logger.warning("Skipping %s: %s", name, exc)
@@ -168,11 +197,6 @@ class BenchmarkRunner:
                     row.judge_correct, row.judge_reason = verdict.correct, verdict.reason
                 result.results.append(row)
                 self._emit({"type": "result", "result": row})
-
-        if self._config.judge:
-            judge_usage.finish()
-            result.judge_usage = judge_usage.to_dict()
-        return result
 
     async def _ask(
         self,

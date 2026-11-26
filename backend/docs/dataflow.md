@@ -25,7 +25,7 @@ flowchart LR
     end
     subgraph Cmp["Compare / benchmark"]
       direction TB
-      Q2["question(s)"] --> AP["4 approaches"] --> RES["side-by-side answers<br/>or graded report"]
+      Q2["question(s)"] --> AP["5 approaches"] --> RES["side-by-side answers<br/>or graded report"]
     end
     WS --> AG
     IX --> AG
@@ -332,6 +332,10 @@ sequenceDiagram
         A->>Q: setup "Preparing code embeddings"
         A->>T: ensure_embeddings() (lock; chunk + embed; once per target)
       end
+      opt json-graph
+        A->>Q: setup "Loading the code graph"
+        A->>T: ensure_graph(store) (lock; extract + sync_repo under the target's ws; once per target)
+      end
       A->>A: build_approach → tools + prompt
       A->>Q: started
       A->>CS: stream("compare-<run>-<approach>", prepare_message(question))
@@ -353,6 +357,9 @@ Notes:
   for it.
 - `sources` events are not forwarded; the UI shows answers, tool steps and usage.
 - For an indexed repository, metadata is written into the main `repos/` directory.
+- `json-graph` uses `ws = graph_workspace_key(target data_dir)`: the fixtures target gets
+  its own namespace (`<data_dir>/compare/fixtures`); an indexed repository reuses the main
+  app's namespace, so its sync rewrites the same nodes the indexing run wrote.
 
 ---
 
@@ -364,7 +371,7 @@ Notes:
 ```mermaid
 flowchart TD
     A[parse args] --> B["load benchmarks/questions.yaml<br/>filter --only / --limit"]
-    B --> C["print plan<br/>(questions, approaches, key set?, fastembed?)"]
+    B --> C["print plan<br/>(questions, approaches, key set?, fastembed?, code graph?)"]
     C --> D{--dry-run?}
     D -->|yes| E["index fixtures into a temp dir<br/>print counts, exit 0"]
     D -->|no| F{ANTHROPIC_API_KEY?}
@@ -374,15 +381,18 @@ flowchart TD
     I --> J{"setup needed?"}
     J -->|json-metadata| K["generate_metadata<br/>1 model call / repo → SetupCost"]
     J -->|json-embeddings| L["chunk + embed → out/work/embeddings.json<br/>(skipped if no fastembed)"]
+    J -->|json-graph| LG["extract + sync_repo into Neo4j<br/>ws = key of out/work/data<br/>(skipped if graph off or unreachable)"]
     J -->|chat, tools-only| M
     K --> M[build_approach + ChatService]
     L --> M
+    LG --> M
     M --> N[for each question]
     N --> O["stream answer; collect tokens,<br/>tool names, errors, usage"]
     O --> P["grade_key_facts<br/>(+ judge_answer if --judge)"]
     P --> N
     N -->|done| I
-    I -->|done| R["write_report:<br/>summary.md, results.csv,<br/>answers.jsonl, run.json"]
+    I -->|done| DG["delete the run's graph ws<br/>(always, also on error)"]
+    DG --> R["write_report:<br/>summary.md, results.csv,<br/>answers.jsonl, run.json"]
 ```
 
 | Step | Data in | Data out |
@@ -390,6 +400,7 @@ flowchart TD
 | Index fixtures | `benchmarks/fixtures/{shop-api,shop-web}` | Indexes + workspace in `out/work/data` |
 | Metadata setup | Index + code (≤ 150 000 chars per repo) | `*.metadata.json`, `SetupCost` |
 | Embedding setup | All scanned files | 60-line chunks + vectors, `embeddings.json`, `SetupCost` |
+| Graph setup | All scanned files | Nodes and edges in Neo4j under the run's `ws`, `SetupCost` (no tokens); deleted at the end |
 | Answer | Question (+ top-k chunks for `json-embeddings`) | Answer text, tool names, `usage` dict |
 | Grade | Answer + `key_facts` (+ `expected_answer` for the judge) | `FactGrade`, optional `JudgeVerdict` |
 | Report | All `QuestionResult`s, setup costs, skipped approaches | Files in `benchmarks/results/<timestamp>/` |
