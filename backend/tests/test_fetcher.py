@@ -98,3 +98,23 @@ def test_remove_tree_deletes_read_only_files(tmp_path: Path) -> None:
     remove_tree(tmp_path / "repo")
 
     assert not (tmp_path / "repo").exists()
+
+def test_ensure_reuses_an_existing_checkout(tmp_path: Path) -> None:
+    checkouts = tmp_path / "checkouts"
+    existing = checkouts / "flask"
+    existing.mkdir(parents=True)
+    (existing / "README.md").write_text("already cloned\n")
+    fetcher = RepoFetcher(checkouts, allowed_hosts=HOSTS)
+
+    snapshot = fetcher.ensure("https://github.com/pallets/flask")
+
+    assert snapshot.name == "flask"
+    assert snapshot.owner == "pallets"
+    assert snapshot.root == existing
+    assert (existing / "README.md").read_text() == "already cloned\n"
+
+
+def test_existing_checkout_rejects_a_path_as_a_name(tmp_path: Path) -> None:
+    fetcher = RepoFetcher(tmp_path / "checkouts", allowed_hosts=HOSTS)
+    with pytest.raises(InvalidRepositorySourceError, match="Unsupported repository name"):
+        fetcher.existing_checkout("../etc")

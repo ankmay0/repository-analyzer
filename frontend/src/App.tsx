@@ -3,14 +3,15 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, getHealth, getWorkspace, startIndexing, type Workspace } from "./api";
 import { ComparePage } from "./compare/ComparePage";
 import { Chat } from "./components/Chat";
+import { DirectPage } from "./components/DirectPage";
 import { HealthStatus, type HealthView } from "./components/HealthStatus";
 import { RepositoryPanel } from "./components/RepositoryPanel";
 
 const POLL_INTERVAL_MS = 1500;
 
-type Tab = "chat" | "compare";
+type Tab = "chat" | "direct" | "compare";
 
-const TAB_LABEL: Record<Tab, string> = { chat: "Chat", compare: "Compare" };
+const TAB_LABEL: Record<Tab, string> = { chat: "Chat", direct: "Direct", compare: "Compare" };
 
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -70,7 +71,7 @@ export function App() {
       <header className="topbar">
         <h1>Repository Analyzer</h1>
         <nav className="tabs" role="tablist" aria-label="Sections">
-          {(["chat", "compare"] as const).map((name) => (
+          {(["chat", "direct", "compare"] as const).map((name) => (
             <button
               key={name}
               type="button"
@@ -100,6 +101,17 @@ export function App() {
           <Chat workspace={workspace} />
         </main>
       </div>
+      {visited.has("direct") && (
+        <main
+          className="page-main"
+          role="tabpanel"
+          id="panel-direct"
+          aria-labelledby="tab-direct"
+          hidden={tab !== "direct"}
+        >
+          <DirectPage workspace={workspace} />
+        </main>
+      )}
       {visited.has("compare") && (
         <main
           className="page-main"

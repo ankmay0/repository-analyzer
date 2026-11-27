@@ -11,12 +11,15 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from repo_analyzer.api.schemas import (
     ChatRequest,
+    DirectAskRequest,
+    DirectAskResponse,
     HealthOut,
     IndexRequest,
     SkillOut,
     WorkspaceOut,
 )
 from repo_analyzer.api.services import Services
+from repo_analyzer.direct_agent import ask_direct
 from repo_analyzer.errors import WorkspaceEmptyError
 from repo_analyzer.ingestion.symbols import probe_ctags
 
@@ -85,3 +88,22 @@ async def chat(body: ChatRequest, services: ServicesDep) -> EventSourceResponse:
             yield ServerSentEvent(event=event.type, data=json.dumps(event.data))
 
     return EventSourceResponse(events())
+
+
+
+@router.post("/direct/ask")
+async def direct_ask(body: DirectAskRequest, services: ServicesDep) -> DirectAskResponse:
+    """Answer a question by reading the cloned repository files directly.
+
+    No Ctags JSON index or Neo4j graph is used. ``repo`` is a git URL, a local
+    path (if ``RA_ALLOW_LOCAL_PATHS`` is on), or the name of an existing checkout.
+    """
+    result = await ask_direct(
+        body.repo,
+        body.question,
+        settings=services.settings,
+        fetcher=services.fetcher,
+        workspace=services.workspace,
+        model=services.model_factory(),
+    )
+    return DirectAskResponse.model_validate(result.to_dict())

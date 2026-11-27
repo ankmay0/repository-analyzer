@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 
 from repo_analyzer.api.services import Services, build_services
 from repo_analyzer.config import Settings
+from repo_analyzer.direct_agent import ask_direct as run_direct_agent
 from repo_analyzer.errors import AnalyzerError
 from repo_analyzer.ingestion.symbols import probe_ctags
 
@@ -107,6 +108,33 @@ def trace_endpoint(repo: str, method: str, path: str) -> str:
     if agent_tool is None:
         return "Error: the code graph is disabled. Set RA_GRAPH_ENABLED=true and run Neo4j."
     return str(agent_tool.invoke({"repo": repo, "method": method, "path": path}))
+
+
+@mcp.tool
+async def ask_direct(repo: str, question: str) -> str:
+    """Ask a LangChain agent that reads the cloned repository files directly.
+
+    No Ctags JSON index or Neo4j graph is used. `repo` is a git URL, a local path
+    (if RA_ALLOW_LOCAL_PATHS is on), or the name of an existing checkout.
+    Needs ANTHROPIC_API_KEY.
+
+    Args:
+        repo: Git URL, local path, or checkout name.
+        question: What to ask about the repository.
+    """
+    services = get_services()
+    try:
+        result = await run_direct_agent(
+            repo,
+            question,
+            settings=services.settings,
+            fetcher=services.fetcher,
+            workspace=services.workspace,
+            model=services.model_factory(),
+        )
+    except AnalyzerError as exc:
+        return f"Error: {exc}"
+    return result.answer or "Error: the agent returned an empty answer"
 
 
 @mcp.resource("info://status")
