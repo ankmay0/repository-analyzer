@@ -413,8 +413,11 @@ curl -s http://127.0.0.1:8000/api/direct/ask \
   -d '{"repo":"https://github.com/pallets/flask","question":"How does routing work?"}'
 ```
 
-The same path is the MCP tool `ask_direct`. There is no Chat-tab toggle for this mode
-yet; use the endpoint or the MCP tool.
+The same path is the MCP tool `ask_direct`, and the **Direct** tab in the web UI
+(`http://localhost:5173`). The tab has a repository field (a git URL, a local path,
+or the name of an existing checkout; already-indexed names are offered as shortcuts)
+and a question box. It calls `POST /api/direct/ask` and shows the answer, the tool
+steps the agent took, and token usage if the server includes it.
 
 ## Benchmark
 

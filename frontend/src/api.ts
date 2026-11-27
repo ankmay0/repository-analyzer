@@ -166,3 +166,64 @@ export async function* streamChat(
     }
   }
 }
+
+
+export interface DirectToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+  result: string | null;
+}
+
+export interface DirectAskResponse {
+  repo: string;
+  question: string;
+  answer: string;
+  tool_calls: DirectToolCall[];
+  /** Present only if the server includes a usage object; otherwise null. */
+  usage: Usage | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** Read a `/api/direct/ask` body, ignoring unknown fields. */
+export function parseDirectAsk(value: unknown): DirectAskResponse {
+  const body = asRecord(value);
+  const rawCalls = Array.isArray(body.tool_calls) ? body.tool_calls : [];
+  const tool_calls: DirectToolCall[] = rawCalls.map((item) => {
+    const call = asRecord(item);
+    const args = call.arguments ?? call.args;
+    return {
+      name: String(call.name ?? ""),
+      arguments: asRecord(args),
+      result: typeof call.result === "string" ? call.result : null,
+    };
+  });
+  const usageRaw = body.usage;
+  return {
+    repo: String(body.repo ?? ""),
+    question: String(body.question ?? ""),
+    answer: String(body.answer ?? ""),
+    tool_calls,
+    usage: typeof usageRaw === "object" && usageRaw !== null ? parseUsage(asRecord(usageRaw)) : null,
+  };
+}
+
+/** Ask the direct agent (no JSON index). Abort `signal` to cancel the request. */
+export async function askDirect(
+  repo: string,
+  question: string,
+  signal?: AbortSignal,
+): Promise<DirectAskResponse> {
+  return parseDirectAsk(
+    await request<unknown>("/api/direct/ask", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ repo, question }),
+      signal,
+    }),
+  );
+}

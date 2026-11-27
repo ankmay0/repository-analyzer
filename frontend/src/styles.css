@@ -185,7 +185,8 @@ label {
 }
 
 textarea,
-select {
+select,
+input[type="text"] {
   width: 100%;
   padding: 0.5rem;
   font: inherit;
@@ -227,7 +228,8 @@ button:disabled {
 
 button:focus-visible,
 textarea:focus-visible,
-select:focus-visible {
+select:focus-visible,
+input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -769,6 +771,59 @@ button.history-active {
 .compare-history .muted {
   white-space: nowrap;
   font-size: 0.78rem;
+}
+
+/* --- Direct page ------------------------------------------------------------- */
+
+.direct {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.direct h2 {
+  font-size: 1.1rem;
+}
+
+.direct-form {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.direct-form input[type="text"] {
+  margin-bottom: 0.6rem;
+}
+
+.direct-form textarea {
+  min-height: 3.2rem;
+}
+
+.direct-suggestions,
+.direct-form > button {
+  margin-top: 0.6rem;
+}
+
+.direct-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.direct-suggestions button {
+  padding: 0.15rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.direct-result .question {
+  margin-top: 0;
 }
 
 @media (max-width: 720px) {
