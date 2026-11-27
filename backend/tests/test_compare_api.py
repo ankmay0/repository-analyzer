@@ -19,6 +19,7 @@ from repo_analyzer.benchmark import service as benchmark_service
 from repo_analyzer.benchmark.approaches import APPROACHES
 from repo_analyzer.benchmark.compare import FIXTURES_ID
 from repo_analyzer.config import Settings
+from repo_analyzer.ingestion.graph_extract import GraphRecords
 from repo_analyzer.ingestion.graph_store import graph_workspace_key
 from support import FakeGraphStore, FunctionChatModel, tool_call, usage
 from test_benchmark import BENCHMARKS
@@ -321,3 +322,20 @@ async def test_bad_requests_are_rejected_before_streaming(
 
     assert response.status_code == status
     assert text in str(response.json()["detail"])
+
+
+async def test_an_indexed_repository_reuses_the_graph_its_indexing_run_loaded(
+    settings: Settings, indexed_workspace: Any, fixture_repos: dict[str, Path]
+) -> None:
+    name = sorted(fixture_repos)[0]
+    graph = FakeGraphStore()
+    main_ws = graph_workspace_key(settings.data_dir)
+    graph.sync_repo(main_ws, name, None, GraphRecords())  # what the indexing run wrote
+    scoped = settings.model_copy(update={"benchmarks_dir": BENCHMARKS})
+    app = make_app(scoped, Script(), graph=graph)
+    async for http in client_for(app):
+        grouped = by_approach(await ask(http, repository=name, approaches=["json-graph"]))
+
+    assert graph.synced == [(main_ws, name)]  # not written again by Compare
+    usage_event = next(e for e in grouped["json-graph"] if e["type"] == "usage")
+    assert "already loaded" in usage_event["setup"]["description"]

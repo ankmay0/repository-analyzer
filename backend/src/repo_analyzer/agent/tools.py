@@ -328,9 +328,11 @@ def build_graph_tools(graph_store: GraphStore, workspace: Workspace, ws: str) ->
 
     def graph_error(exc: Exception) -> ToolOutput:
         logger.warning("Code graph query failed: %s: %s", type(exc).__name__, exc)
+        reason = "timed out (Neo4j is busy)" if "TimedOut" in str(exc) else type(exc).__name__
         return (
-            f"Error: the code graph could not be queried ({type(exc).__name__}). "
-            "Use search_code and read_file instead.",
+            f"Error: the code graph could not be queried ({reason}). Try once more; if it "
+            "fails again, use search_code and read_file if you have them, or say the graph "
+            "was unavailable.",
             [],
         )
 

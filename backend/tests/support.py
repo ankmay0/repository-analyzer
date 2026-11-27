@@ -191,6 +191,7 @@ class FakeGraphStore:
         self.repos: dict[tuple[str, str], GraphRecords] = {}
         self.commits: dict[tuple[str, str], str | None] = {}
         self.deleted: list[tuple[str, str]] = []
+        self.synced: list[tuple[str, str]] = []
         self.fail = fail
         self.reachable = reachable
         self.schema_calls = 0
@@ -207,12 +208,16 @@ class FakeGraphStore:
             raise ConnectionError("simulated Neo4j outage")
         self.repos[(ws, repo)] = records
         self.commits[(ws, repo)] = commit
+        self.synced.append((ws, repo))
 
     def delete_repo(self, ws: str, repo: str) -> None:
         if self.fail:
             raise ConnectionError("simulated Neo4j outage")
         self.repos.pop((ws, repo), None)
         self.deleted.append((ws, repo))
+
+    def has_repo(self, ws: str, repo: str) -> bool:
+        return (ws, repo) in self.repos
 
     def endpoints(self, ws: str, repo: str) -> list[dict[str, Any]]:
         records = self.repos.get((ws, repo), GraphRecords())
@@ -233,20 +238,20 @@ class FakeGraphStore:
         outgoing: dict[str, list[Any]] = defaultdict(list)
         for call in records.calls:
             outgoing[call.caller].append(call)
-        paths: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
-
-        def walk(path_nodes: list[dict[str, Any]], rels: list[dict[str, Any]]) -> None:
-            paths.append((path_nodes, rels))
-            if len(rels) == MAX_TRACE_DEPTH:
-                return
-            for call in outgoing[path_nodes[-1]["id"]]:
-                if all(node["id"] != call.callee for node in path_nodes):
-                    walk(
-                        [*path_nodes, nodes[call.callee]],
-                        [*rels, {"via": call.via, "line": call.line}],
-                    )
-
-        walk([nodes[endpoint["handler"]]], [])
+        # Same shape as the Cypher: functions within MAX_TRACE_DEPTH calls, then their edges.
+        reach, frontier = {endpoint["handler"]}, {endpoint["handler"]}
+        for _ in range(MAX_TRACE_DEPTH):
+            frontier = {c.callee for f in frontier for c in outgoing[f]} - reach
+            reach |= frontier
+        paths: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = [
+            ([nodes[endpoint["handler"]]], [])
+        ]
+        paths += [
+            ([nodes[c.caller], nodes[c.callee]], [{"via": c.via, "line": c.line}])
+            for f in reach
+            for c in outgoing[f]
+            if c.callee in reach
+        ]
         return assemble_trace(endpoint, paths, [asdict(a) for a in records.accesses])
 
     def neighbours(self, ws: str, repo: str, function: str, direction: str) -> list[dict[str, Any]]:

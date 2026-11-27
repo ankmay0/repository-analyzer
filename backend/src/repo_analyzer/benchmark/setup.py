@@ -133,19 +133,24 @@ class ApproachSetup:
         )
         return index, cost
 
-    def build_graph(self, store: GraphStore | None, ws: str) -> SetupCost:
-        """Load every workspace repository into the code graph under ``ws``."""
+    def build_graph(self, store: GraphStore | None, ws: str, *, reuse: bool = False) -> SetupCost:
+        """Load every workspace repository into the code graph under ``ws``.
+
+        With ``reuse``, a repository already in ``ws`` (synced by the indexing run) is kept.
+        """
         reason = graph_unavailable_reason(store)
         if store is None or reason is not None:
             raise ApproachUnavailableError(reason or GRAPH_DISABLED)
         usage = UsageTracker()
-        repositories = self._workspace.state.repositories
-        for repository in repositories:
+        loaded = 0
+        for repository in self._workspace.state.repositories:
+            if reuse and store.has_repo(ws, repository.name):
+                continue
             records = extract_graph(self.source_files(repository.name))
             store.sync_repo(ws, repository.name, repository.commit, records)
+            loaded += 1
         usage.finish()
-        return SetupCost(
-            "json-graph",
-            f"code graph for {len(repositories)} repositories (local parsing, no LLM tokens)",
-            usage.to_dict(),
-        )
+        description = f"code graph for {loaded} repositories (local parsing, no LLM tokens)"
+        if loaded == 0:
+            description = "code graph already loaded by indexing (no work)"
+        return SetupCost("json-graph", description, usage.to_dict())

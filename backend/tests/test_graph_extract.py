@@ -289,3 +289,87 @@ def test_files_that_do_not_parse_are_skipped() -> None:
 
     assert [f.name for f in records.functions] == ["ok"]
     assert {f.path for f in records.files} == {"bad.py", "good.py"}
+
+
+def test_layered_app_resolves_through_type_hints_and_protocols() -> None:
+    """Route -> service (typed parameter) -> repository (typed attribute, Protocol with one
+    implementation) -> table (SQL in a class constant)."""
+    records = extract_graph(
+        [
+            py(
+                "app/repos.py",
+                """
+                from typing import Protocol
+
+                class VideoRepo(Protocol):
+                    def get(self, vid): ...
+                    def save(self, video): ...
+
+                class PgVideoRepo:
+                    _GET_SQL = "SELECT id FROM videos WHERE id = %s"
+
+                    def get(self, vid):
+                        return self._pool.execute(self._GET_SQL, (vid,))
+
+                    def save(self, video): ...
+
+                class Cache:
+                    def get(self, key): ...
+                """,
+            ),
+            py(
+                "app/services.py",
+                """
+                from app.repos import VideoRepo
+
+                class Service:
+                    def get(self, vid): ...
+
+                class VideoService:
+                    def __init__(self, *, repo: VideoRepo) -> None:
+                        self._repo = repo
+
+                    def find(self, vid):
+                        return self._repo.get(vid)
+                """,
+            ),
+            py(
+                "app/routes.py",
+                """
+                from app.services import VideoService
+
+                def show(video_id, service: VideoService | None = None):
+                    return service.find(video_id=video_id)
+                """,
+            ),
+            py("tests/test_routes.py", "def video_id(): ...\n"),  # a pytest fixture
+        ]
+    )
+
+    assert calls(records) == {
+        ("show", "VideoService.find", "call"),  # from the parameter's type hint
+        ("VideoService.find", "PgVideoRepo.get", "call"),  # the class that implements VideoRepo
+    }  # the video_id parameter is not linked to the test fixture of the same name
+    assert accesses(records) == {("PgVideoRepo.get", READS, "videos")}
+
+
+def test_module_sql_constants_and_local_names_shadowing_functions() -> None:
+    records = extract_graph(
+        [
+            py(
+                "store.py",
+                """
+                _DELETE_SQL = "DELETE FROM sessions WHERE id = %s"
+
+                def handler(): ...
+
+                def purge(conn, handler):
+                    conn.execute(_DELETE_SQL)
+                    handler()
+                """,
+            )
+        ]
+    )
+
+    assert accesses(records) == {("purge", WRITES, "sessions")}
+    assert calls(records) == set()  # the handler parameter is not the handler function

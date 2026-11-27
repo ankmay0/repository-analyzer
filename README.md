@@ -397,9 +397,9 @@ so no Neo4j is needed; the one Neo4j round-trip test runs only when `RA_TEST_NEO
   previous indexes, though checkouts fetched before the failure are already refreshed.
 - **Default branch only**, at the commit current when indexing ran.
 - **Code graph coverage** (optional feature): Python only, FastAPI routes only
-  (`include_router(..., prefix=...)` prefixes are not applied), calls resolved by name so
-  dynamic dispatch and dependency injection show up as gaps, and tables are linked within
-  one repository only.
+  (`include_router(..., prefix=...)` prefixes are not applied), calls resolved by name and
+  type hints (untyped dependencies and interfaces with several implementations show up as
+  gaps), and tables are linked within one repository only.
 
 ### Compare tab
 

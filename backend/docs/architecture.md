@@ -298,13 +298,13 @@ database) and `repo`. Extraction rules (`graph_extract.py`):
 | What | How |
 | --- | --- |
 | Functions, classes, methods | Python `ast`; methods are `Class.method`; nested functions and lambdas fold into the enclosing function |
-| Calls | By name: a name imported from an in-repo module links to that module's function; calls through modules from outside the repo (`httpx.post`) are skipped; otherwise unique-in-repo, else same file, else recorded as `unresolved` (a gap). `obj.m()` considers methods only; `self.m()` prefers the same class. A repo function passed as an argument (`cached(key, ttl, load)`) is a call `via: "reference"` |
+| Calls | Parameters and local variables shadow repo functions (never linked). A name imported from an in-repo module links to that module's function; calls through modules from outside the repo (`httpx.post`) are skipped. `x.m()` / `self._x.m()` use the receiver's type hint (parameter annotation, `self._x = x` in `__init__`, `self._x: T`, `x = Cls()`); a `Protocol`/`ABC` type links to the one class that implements all its methods (else the interface method). Otherwise unique-in-repo, else same file, else recorded as `unresolved` (a gap). `obj.m()` considers methods only; `self.m()` prefers the same class. Production code never links into test files. A repo function passed as an argument (`cached(key, ttl, load)`) is a call `via: "reference"` |
 | Endpoints | FastAPI `@router.get/post/put/patch/delete(...)` and `@router.api_route(..., methods=[...])` on `APIRouter(prefix=...)` / `FastAPI()` variables in the same module |
 | Tables declared | `CREATE TABLE` in `.sql` files; SQLAlchemy `__tablename__` and `Table("name", ...)`; Django `models.Model` (`Meta.db_table` or `<app>_<model>`, abstract models skipped) |
-| Reads / writes | SQL string literals and f-string literal parts starting with `SELECT/INSERT/UPDATE/DELETE/WITH`: `FROM`/`JOIN` read; `INSERT INTO`, `UPDATE x SET`, `DELETE FROM` write (`SELECT … FOR UPDATE` stays a read). SQLAlchemy `select(M)`, `session.query(M)`, `session.get(M, …)` read; `insert/update/delete(M)`, `session.add(M(…))` write. Django `M.objects.filter/get/all/…` read; `create/update/delete/bulk_create/…` write. When any table is declared, only declared names are kept |
+| Reads / writes | SQL string literals, f-string literal parts and module/class constants used by the function (`_SQL`, `self._SQL`) starting with `SELECT/INSERT/UPDATE/DELETE/WITH`: `FROM`/`JOIN` read; `INSERT INTO`, `UPDATE x SET`, `DELETE FROM` write (`SELECT … FOR UPDATE` stays a read). SQLAlchemy `select(M)`, `session.query(M)`, `session.get(M, …)` read; `insert/update/delete(M)`, `session.add(M(…))` write. Django `M.objects.filter/get/all/…` read; `create/update/delete/bulk_create/…` write. When any table is declared, only declared names are kept |
 
 `GraphStore.trace_endpoint(ws, repo, method, path)` matches the route (exact, then
-`{param}` templates), follows `CALLS*0..6` from the handler, and returns depth-first steps
+`{param}` templates), collects the functions within 6 `CALLS` of the handler (distinct, so no path explosion) and the calls between them, and returns depth-first steps
 in call-line order with each function's tables and the trace's gaps
 (`assemble_trace`). The Chat agent reaches it through `trace_endpoint`, `callers_of` and
 `callees_of` (§7).
@@ -492,9 +492,10 @@ Data sent to Anthropic: chat transcripts and tool output; with endpoint metadata
   `get_endpoint_metadata` will also find it if `RA_ENDPOINT_METADATA` is on.
 - **Code graph coverage**: Python only (a TypeScript client's calls are not linked to the
   API's endpoints); FastAPI routing only (`include_router(..., prefix=...)` prefixes and
-  Flask/Django URL configs are not resolved); name-based call resolution, so dynamic
-  dispatch, dependency injection and calls through variables become gaps; SQL assembled
-  from module-level constants only contributes the literal parts inside the function;
+  Flask/Django URL configs are not resolved); calls resolved by name and type hints, so
+  untyped dependencies, interfaces with several implementations and calls through
+  variables become gaps; SQL is read from strings in the function and from module/class
+  constants it uses (`_SQL`, `self._SQL`), not from strings built elsewhere;
   tables are per repository (two repos sharing a database are not linked). One write
   transaction per repo: fine for a few repositories, split it by label past ~100k nodes.
 - `GET /api/health` spawns Ctags twice per call and, with the graph enabled, opens a

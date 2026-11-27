@@ -69,7 +69,10 @@ class CompareTarget:
     metadata_store: MetadataStore | None = None
     embedding_index: EmbeddingIndex | None = None
     graph_ws: str | None = None
+    reuse_graph: bool = False  # an indexed repo: the indexing run already loaded the graph
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Separate lock: loading the graph must not wait for embeddings or metadata to finish.
+    graph_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def ensure_metadata(self) -> tuple[MetadataStore, SetupCost | None]:
         """Generate (or load) endpoint metadata once; the cost is reported only to the caller
@@ -89,11 +92,11 @@ class CompareTarget:
 
     def ensure_graph(self, store: GraphStore | None) -> tuple[str, SetupCost | None]:
         """Load the target's repositories into the code graph once, in its own namespace."""
-        with self.lock:
+        with self.graph_lock:
             if self.graph_ws is not None:
                 return self.graph_ws, None
             ws = graph_workspace_key(self.settings.data_dir)
-            cost = self.setup.build_graph(store, ws)
+            cost = self.setup.build_graph(store, ws, reuse=self.reuse_graph)
             self.graph_ws = ws
             return ws, cost
 
@@ -205,6 +208,7 @@ class CompareService:
                 RepoIndexStore(self._settings.repos_dir),
                 workspace,
             )
+            target.reuse_graph = True
             self._targets[key] = target
             return target
 

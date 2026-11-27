@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_TRACE_DEPTH = 6  # also fixed in _TRACE_PATHS; Cypher cannot parameterise it
-MAX_TRACE_PATHS = 300
+MAX_TRACE_DEPTH = 6  # also fixed in _TRACE_EDGES; Cypher cannot parameterise it
+MAX_TRACE_EDGES = 1000
 MAX_TRACE_STEPS = 60
 MAX_ENDPOINTS = 500
 MAX_NEIGHBOURS = 50
@@ -114,8 +114,9 @@ def assemble_trace(
 ) -> Trace:
     """Turn call paths from the handler into ordered, depth-first steps.
 
-    ``paths`` are ``(nodes, rels)`` pairs as Neo4j returns them for
-    ``(handler)-[:CALLS*0..N]->(f)``; ``accesses`` are ``{function, table, kind, line}``.
+    ``paths`` are ``(nodes, rels)`` pairs starting with ``([handler], [])``; single call
+    edges ``([caller, callee], [rel])`` are enough. ``accesses`` are
+    ``{function, table, kind, line}``.
     Callees are visited in call-line order; a function reached twice is listed again
     as ``repeated`` without its callees.
     """
@@ -152,7 +153,9 @@ def assemble_trace(
                 end_line=node.get("end_line"),
                 via=via,
                 call_line=call_line,
-                tables=() if repeated else tuple(sorted(tables.get(fid, []), key=lambda t: t[2])),
+                tables=()
+                if repeated
+                else tuple(sorted(tables.get(fid, []), key=lambda t: (t[2], t[0], t[1]))),
                 repeated=repeated,
             )
         )
@@ -196,6 +199,10 @@ class GraphStore(Protocol):
         ...
 
     def delete_repo(self, ws: str, repo: str) -> None: ...
+
+    def has_repo(self, ws: str, repo: str) -> bool:
+        """Whether ``repo`` has been synced into ``ws``."""
+        ...
 
     def endpoints(self, ws: str, repo: str) -> list[Row]:
         """``{method, path, handler, file, line}`` for every endpoint of ``repo``."""
@@ -283,16 +290,25 @@ CREATE (f)-[:{kind} {{line: r.line}}]->(t)
     for kind in (READS, WRITES)
 }
 
+_HAS_REPO = "MATCH (r:Repo {ws: $ws, repo: $repo}) RETURN count(r) AS n"
 _ENDPOINTS = """
 MATCH (e:Endpoint {ws: $ws, repo: $repo})
 RETURN e.method AS method, e.path AS path, e.handler AS handler, e.file AS file, e.line AS line
 ORDER BY path, method LIMIT $limit
 """
-_TRACE_PATHS = """
+# The functions reachable from the handler (distinct, so no path explosion) and the
+# calls between them; assemble_trace rebuilds the ordered tree from these edges.
+_TRACE_EDGES = """
 MATCH (h:Function {ws: $ws, repo: $repo, id: $handler})
-MATCH p = (h)-[:CALLS*0..6]->(:Function)
-RETURN [n IN nodes(p) | n {.id, .name, .path, .line, .end_line, .unresolved}] AS nodes,
-       [r IN relationships(p) | r {.via, .line}] AS rels
+OPTIONAL MATCH (h)-[:CALLS*1..6]->(f:Function)
+WITH h, collect(DISTINCT f) + [h] AS reach
+UNWIND reach AS a
+OPTIONAL MATCH (a)-[c:CALLS]->(b:Function)
+WHERE b IN reach
+RETURN h {.id, .name, .path, .line, .end_line, .unresolved} AS root,
+       a {.id, .name, .path, .line, .end_line, .unresolved} AS caller,
+       b {.id, .name, .path, .line, .end_line, .unresolved} AS callee,
+       c {.via, .line} AS rel
 LIMIT $limit
 """
 _TRACE_ACCESS = """
@@ -332,7 +348,7 @@ class Neo4jGraphStore:
         password: str,
         database: str,
         *,
-        query_timeout: float = 10.0,
+        query_timeout: float = 30.0,  # reads are LIMITed; a busy Neo4j can take >10 s
         write_timeout: float = 120.0,
     ) -> None:
         self._uri = uri
@@ -458,6 +474,9 @@ class Neo4jGraphStore:
             session.execute_write(neo4j.unit_of_work(timeout=self._write_timeout)(delete))
         logger.info("Neo4j: removed %s (ws=%s)", repo, ws)
 
+    def has_repo(self, ws: str, repo: str) -> bool:
+        return bool(self._read(_HAS_REPO, ws=ws, repo=repo)[0]["n"])
+
     def endpoints(self, ws: str, repo: str) -> list[Row]:
         return self._read(_ENDPOINTS, ws=ws, repo=repo, limit=MAX_ENDPOINTS)
 
@@ -466,11 +485,14 @@ class Neo4jGraphStore:
         if endpoint is None:
             return None
         rows = self._read(
-            _TRACE_PATHS, ws=ws, repo=repo, handler=endpoint["handler"], limit=MAX_TRACE_PATHS
+            _TRACE_EDGES, ws=ws, repo=repo, handler=endpoint["handler"], limit=MAX_TRACE_EDGES
         )
-        paths = [(row["nodes"], row["rels"]) for row in rows]
+        if not rows:
+            return assemble_trace(endpoint, [], [])
+        paths: list[tuple[list[Row], list[Row]]] = [([rows[0]["root"]], [])]
+        paths += [([row["caller"], row["callee"]], [row["rel"]]) for row in rows if row["callee"]]
         ids = sorted({node["id"] for nodes, _ in paths for node in nodes})
-        accesses = self._read(_TRACE_ACCESS, ws=ws, repo=repo, ids=ids, limit=MAX_TRACE_PATHS)
+        accesses = self._read(_TRACE_ACCESS, ws=ws, repo=repo, ids=ids, limit=MAX_TRACE_EDGES)
         return assemble_trace(endpoint, paths, accesses)
 
     def neighbours(self, ws: str, repo: str, function: str, direction: str) -> list[Row]:

@@ -146,7 +146,7 @@ sequenceDiagram
 | **Metadata** (opt.) | index + re-scanned code | `*.metadata.json` | Non-test code only, line-numbered, 150 000-char budget; model output normalised; failures never fail the run |
 | **Swap** | `IndexedRepository`s | `workspace.json` + memory | Persist then swap under lock |
 | **Clean up** | previous workspace | — | Delete index (and metadata) files no longer referenced; checkouts are not deleted |
-| **Code graph** (opt.) | re-scanned files | Neo4j subgraph per repo (`ws`, `repo`) | Python `ast` + `.sql`; names, paths, lines, routes and table names only (no source text); calls resolved by name, gaps kept as `unresolved`; repos that left the workspace deleted first |
+| **Code graph** (opt.) | re-scanned files | Neo4j subgraph per repo (`ws`, `repo`) | Python `ast` + `.sql`; names, paths, lines, routes and table names only (no source text); calls resolved by name and type hints, gaps kept as `unresolved`; repos that left the workspace deleted first |
 
 ### 2.4 Failure behaviour
 
@@ -334,7 +334,7 @@ sequenceDiagram
       end
       opt json-graph
         A->>Q: setup "Loading the code graph"
-        A->>T: ensure_graph(store) (lock; extract + sync_repo under the target's ws; once per target)
+        A->>T: ensure_graph(store) (own lock; extract + sync_repo under the target's ws; once per target)
       end
       A->>A: build_approach → tools + prompt
       A->>Q: started
@@ -358,8 +358,10 @@ Notes:
 - `sources` events are not forwarded; the UI shows answers, tool steps and usage.
 - For an indexed repository, metadata is written into the main `repos/` directory.
 - `json-graph` uses `ws = graph_workspace_key(target data_dir)`: the fixtures target gets
-  its own namespace (`<data_dir>/compare/fixtures`); an indexed repository reuses the main
-  app's namespace, so its sync rewrites the same nodes the indexing run wrote.
+  its own namespace (`<data_dir>/compare/fixtures`); an indexed repository uses the main
+  app's namespace and reuses the graph its indexing run loaded (`has_repo`), so Compare
+  writes nothing unless the repo is missing. The graph has its own lock, so it never waits
+  for embeddings or metadata to be built.
 
 ---
 

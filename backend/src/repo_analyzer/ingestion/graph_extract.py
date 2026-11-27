@@ -211,6 +211,77 @@ def _call_name(node: ast.expr) -> str | None:
     return None
 
 
+def _is_test(path: str) -> bool:
+    p = PurePosixPath(path)
+    return (
+        bool({"test", "tests"} & set(p.parts[:-1]))
+        or p.name.startswith("test_")
+        or p.name.endswith("_test.py")
+        or p.name == "conftest.py"
+    )
+
+
+def _type_name(annotation: ast.expr | None) -> str | None:
+    """The class an annotation names: ``X``, ``mod.X``, ``"X"``, ``X | None``, ``Optional[X]``."""
+    if isinstance(annotation, ast.Name):
+        return annotation.id
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        text = annotation.value.split("[")[0].split("|")[0].strip()
+        return text.rsplit(".", 1)[-1] or None
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        left = annotation.left
+        is_none = isinstance(left, ast.Constant) and left.value is None
+        return _type_name(annotation.right if is_none else left)
+    if isinstance(annotation, ast.Subscript) and _type_name(annotation.value) in (
+        "Optional",
+        "Annotated",
+    ):
+        inner = annotation.slice
+        return _type_name(inner.elts[0] if isinstance(inner, ast.Tuple) else inner)
+    return None
+
+
+def _parameters(node: FunctionNode) -> list[ast.arg]:
+    a = node.args
+    return [*a.posonlyargs, *a.args, *a.kwonlyargs, *(x for x in (a.vararg, a.kwarg) if x)]
+
+
+def _local_names(node: FunctionNode) -> set[str]:
+    """Parameters and names bound inside the function (they shadow repo functions)."""
+    names = {p.arg for p in _parameters(node)}
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+            names.add(child.id)
+        elif isinstance(child, ast.arg):
+            names.add(child.arg)
+        elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child is not node:
+            names.add(child.name)
+    return names
+
+
+def _local_types(node: FunctionNode) -> dict[str, str]:
+    """``name -> class name`` from parameter annotations and ``x = Cls(...)``."""
+    types = {p.arg: t for p in _parameters(node) if (t := _type_name(p.annotation))}
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Assign)
+            and len(child.targets) == 1
+            and isinstance(child.targets[0], ast.Name)
+            and isinstance(child.value, ast.Call)
+            and isinstance(child.value.func, ast.Name)
+        ):
+            types[child.targets[0].id] = child.value.func.id
+        elif (
+            isinstance(child, ast.AnnAssign)
+            and isinstance(child.target, ast.Name)
+            and (t := _type_name(child.annotation))
+        ):
+            types[child.target.id] = t
+    return types
+
+
 def _join_route(prefix: str, path: str) -> str:
     joined = prefix.rstrip("/") + ("/" + path.lstrip("/") if path.strip("/") else "")
     return joined or "/"
@@ -234,6 +305,11 @@ class _Extractor:
         self.class_names: set[str] = set()
         self.top_by_name: dict[str, list[str]] = defaultdict(list)
         self.methods_by_name: dict[str, list[str]] = defaultdict(list)
+        self.class_methods: dict[str, list[dict[str, str]]] = defaultdict(list)  # name -> methods
+        self.interfaces: set[str] = set()  # Protocol / ABC class names
+        self.attr_types: dict[tuple[str, str], dict[str, str]] = {}  # (path, class) -> attr -> type
+        # (path, class or None, name) -> SQL text held in a module or class constant
+        self.sql_constants: dict[tuple[str, str | None, str], str] = {}
         self.model_tables: dict[str, str] = {}  # ORM class or Table variable -> table
         self.declared: dict[str, str] = {}  # table -> declaring file
 
@@ -280,21 +356,71 @@ class _Extractor:
                 self._index_class(module, stmt)
             elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 self._index_assignment(module, stmt)
+            self._index_sql_constant(module.path, None, stmt)
+
+    def _index_sql_constant(self, path: str, cls: str | None, stmt: ast.stmt) -> None:
+        """``_SQL = "SELECT ..."`` at module or class level, used later as ``_SQL`` or
+        ``self._SQL``."""
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target, value = stmt.targets[0], stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            target, value = stmt.target, stmt.value
+        else:
+            return
+        if isinstance(target, ast.Name) and (sql := self._sql_text(value)) is not None:
+            self.sql_constants[(path, cls, target.id)] = sql
 
     def _index_class(self, module: _Module, node: ast.ClassDef) -> None:
         cid = f"{module.path}:{node.name}"
         self.classes.append(ClassRecord(cid, node.name, module.path, node.lineno, _end(node)))
         self.class_names.add(node.name)
         methods = module.methods.setdefault(node.name, {})
+        self.class_methods[node.name].append(methods)
+        if any(_type_name(base) in ("Protocol", "ABC") for base in node.bases):
+            self.interfaces.add(node.name)
+        attrs = self.attr_types.setdefault((module.path, node.name), {})
         for stmt in node.body:
+            self._index_sql_constant(module.path, node.name, stmt)
+            if (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                and (t := _type_name(stmt.annotation))
+            ):
+                attrs[stmt.target.id] = t  # dataclass-style field
             if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
                 fid = self._add_function(module, stmt, f"{node.name}.{stmt.name}")
                 methods[stmt.name] = fid
                 self.methods_by_name[stmt.name].append(fid)
+                self._index_attribute_types(stmt, attrs)
         table = self._orm_table(module, node)
         if table:
             self.model_tables[node.name] = table
             self.declared.setdefault(table, module.path)
+
+    @staticmethod
+    def _index_attribute_types(method: FunctionNode, attrs: dict[str, str]) -> None:
+        """``self.x = param`` (param annotated) and ``self.x: T = ...`` give ``x`` a type."""
+        params = _local_types(method)
+        for child in ast.walk(method):
+            if isinstance(child, ast.Assign):
+                targets, value = child.targets, child.value
+            elif isinstance(child, ast.AnnAssign):
+                targets, value = [child.target], None
+            else:
+                continue
+            for target in targets:
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    continue
+                if isinstance(child, ast.AnnAssign) and (t := _type_name(child.annotation)):
+                    attrs[target.attr] = t
+                elif isinstance(value, ast.Name) and value.id in params:
+                    attrs.setdefault(target.attr, params[value.id])
+                elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                    attrs.setdefault(target.attr, value.func.id)
 
     def _orm_table(self, module: _Module, node: ast.ClassDef) -> str | None:
         for stmt in node.body:  # SQLAlchemy declarative
@@ -448,6 +574,8 @@ class _Extractor:
 
     def _pick(self, candidates: list[str], path: str) -> tuple[str | None, bool]:
         """``(function id, ambiguous)`` under the unique-name / same-file rule."""
+        if not _is_test(path):  # production code never calls into test files
+            candidates = [c for c in candidates if not _is_test(self.functions[c].path)]
         if len(candidates) == 1:
             return candidates[0], False
         local = [c for c in candidates if self.functions[c].path == path]
@@ -471,14 +599,63 @@ class _Extractor:
             return None, False
         return self._pick(self.top_by_name.get(name, []), module.path)
 
+    def _typed_method(self, type_name: str, method: str) -> str | None:
+        """``method`` of the class ``type_name``; for a Protocol/ABC, its one implementation."""
+        owners = [m[method] for m in self.class_methods.get(type_name, []) if method in m]
+        if len(owners) != 1:
+            return None  # not a repo class, no such method, or the class name is ambiguous
+        if type_name not in self.interfaces:
+            return owners[0]
+        # Structural match: classes that define every method the interface declares.
+        required = set().union(*(m.keys() for m in self.class_methods[type_name])) - {"__init__"}
+        implementers = [
+            methods[method]
+            for name, listed in self.class_methods.items()
+            if name not in self.interfaces
+            for methods in listed
+            if method in methods
+            and required <= methods.keys()
+            and not _is_test(self.functions[methods[method]].path)
+        ]
+        if len(implementers) == 1:
+            return implementers[0]
+        implementations = [
+            c
+            for c in self.methods_by_name.get(method, [])
+            if c not in owners
+            and self.functions[c].name.split(".")[0] not in self.interfaces
+            and not _is_test(self.functions[c].path)
+        ]
+        # ponytail: one implementation is linked; with several, the interface method stands in.
+        return implementations[0] if len(implementations) == 1 else owners[0]
+
     def resolve_call(
-        self, module: _Module, cls: str | None, func: ast.expr
+        self,
+        module: _Module,
+        cls: str | None,
+        func: ast.expr,
+        local_names: frozenset[str] = frozenset(),
+        local_types: dict[str, str] | None = None,
     ) -> tuple[str | None, bool]:
         if isinstance(func, ast.Name):
+            if func.id in local_names:
+                return None, False  # a parameter or local variable, not a repo function
             return self.resolve_name(module, func.id)
         if not isinstance(func, ast.Attribute):
             return None, False
         base = func.value
+        receiver: str | None = None
+        if (
+            isinstance(base, ast.Attribute)
+            and isinstance(base.value, ast.Name)
+            and base.value.id == "self"
+            and cls is not None
+        ):
+            receiver = self.attr_types.get((module.path, cls), {}).get(base.attr)
+        elif isinstance(base, ast.Name) and local_types and base.id in local_types:
+            receiver = local_types[base.id]
+        if receiver and (typed := self._typed_method(receiver, func.attr)):
+            return typed, False
         if isinstance(base, ast.Name):
             if base.id in module.names:
                 source, symbol = module.names[base.id]
@@ -507,24 +684,42 @@ class _Extractor:
             if key not in calls or calls[key].line > line:
                 calls[key] = CallRecord(fid, callee, line, via)
 
+        local_names = frozenset(_local_names(node))
+        local_types = _local_types(node)
         for stmt in body:
             for child in ast.walk(stmt):
                 if isinstance(child, ast.Call):
-                    callee, ambiguous = self.resolve_call(module, cls, child.func)
+                    callee, ambiguous = self.resolve_call(
+                        module, cls, child.func, local_names, local_types
+                    )
                     if callee:
                         add_call(callee, child.lineno, "call")
                     elif ambiguous and (name := _call_name(child.func)):
                         unresolved.add(name)
                     for argument in [*child.args, *(k.value for k in child.keywords)]:
-                        if isinstance(argument, ast.Name):
+                        if isinstance(argument, ast.Name) and argument.id not in local_names:
                             ref, _ = self.resolve_name(module, argument.id)
                             if ref:
                                 add_call(ref, child.lineno, "reference")
                     accesses += self._orm_access(fid, child)
                 sql = self._sql_text(child)
+                if sql is None:
+                    sql = self._sql_constant(module, cls, child, local_names)
                 if sql is not None and isinstance(child, ast.expr):
                     accesses += self._sql_access(fid, sql, child.lineno)
         return list(calls.values()), accesses, unresolved
+
+    def _sql_constant(
+        self, module: _Module, cls: str | None, node: ast.AST, local_names: frozenset[str]
+    ) -> str | None:
+        """SQL from a constant the function refers to: ``_SQL``, ``self._SQL``, ``Cls._SQL``."""
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in local_names:
+                return self.sql_constants.get((module.path, None, node.id))
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            owner = cls if node.value.id in ("self", "cls") else node.value.id
+            return self.sql_constants.get((module.path, owner, node.attr))
+        return None
 
     @staticmethod
     def _sql_text(node: ast.AST) -> str | None:

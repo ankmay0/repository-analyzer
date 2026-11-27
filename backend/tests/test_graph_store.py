@@ -140,6 +140,7 @@ def test_neo4j_round_trip_matches_the_in_memory_store() -> None:
     try:
         store.sync_repo(ws, "shop-api", "abc", records)
         store.sync_repo(ws, "shop-api", "abc", records)  # replacing is idempotent
+        assert store.has_repo(ws, "shop-api") and not store.has_repo(ws, "shop-web")
         expected = shop_store().trace_endpoint("ws", "shop-api", "POST", "/orders")
         actual = store.trace_endpoint(ws, "shop-api", "POST", "/orders")
         assert actual is not None and expected is not None
@@ -156,4 +157,5 @@ def test_neo4j_round_trip_matches_the_in_memory_store() -> None:
     finally:
         store.delete_repo(ws, "shop-api")
         assert store.endpoints(ws, "shop-api") == []
+        assert not store.has_repo(ws, "shop-api")
         store.close()
