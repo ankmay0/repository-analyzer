@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from repo_analyzer.ingestion.jobs import JobStatus
@@ -86,3 +88,25 @@ class HealthOut(BaseModel):
 class SkillOut(BaseModel):
     name: str
     description: str
+
+
+class DirectAskRequest(BaseModel):
+    repo: str = Field(
+        min_length=1,
+        max_length=2_000,
+        description="Git URL, local path, or checkout name.",
+    )
+    question: str = Field(min_length=1, max_length=8_000)
+
+
+class DirectToolCall(BaseModel):
+    name: str
+    arguments: dict[str, Any]
+    result: str | None = None
+
+
+class DirectAskResponse(BaseModel):
+    repo: str
+    question: str
+    answer: str
+    tool_calls: list[DirectToolCall]

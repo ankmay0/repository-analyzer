@@ -55,6 +55,7 @@ Backend layout (`backend/src/repo_analyzer/`):
 | `retrieval/` | Optional in-memory embeddings for the benchmark's `json-embeddings` approach |
 | `benchmark/` | The four answering approaches, the Compare service and the CLI benchmark |
 | `agent/` | Tools (including `load_skill`), system prompt, skill loader, the LangGraph graph, and the service that streams a turn |
+| `direct_agent.py` | A LangChain agent that reads a clone directly from disk (no JSON index or graph) |
 | `api/` | Composition root (`services.py`), routes, request/response schemas |
 | `workspace.py` | The current set of indexed repositories, persisted as `workspace.json` |
 
@@ -315,6 +316,7 @@ Set in the environment or in `backend/.env`. The full list is in
 | `GET /api/compare/status` | Repositories you can compare on (the benchmark fixtures and every indexed repository) and each approach as available or not, with the reason |
 | `POST /api/compare` | `{"question", "repository"?, "approaches"?}`: answers one question under every available approach at once, as one SSE stream. 503 without `ANTHROPIC_API_KEY`, 404 for an unknown repository |
 | `POST /api/chat` | `{"thread_id", "message"}` — SSE stream: `token`, `tool_call`, `sources`, `error`, `usage`, `done` |
+| `POST /api/direct/ask` | `{"repo", "question"}` — LangChain agent that reads the clone's files directly (no JSON index or graph). `repo` is a git URL, a local path, or a checkout name. Returns `{repo, question, answer, tool_calls}` |
 
 Interactive documentation is served at http://127.0.0.1:8000/docs.
 
@@ -349,6 +351,7 @@ backend objects the web API uses, so there is no second copy of the logic.
 | `list_repositories()` | Lists the indexed repositories |
 | `ask_question(question, thread_id)` | Asks the agent a question and returns its answer (needs `ANTHROPIC_API_KEY`) |
 | `trace_endpoint(repo, method, path)` | Traces an endpoint to its database tables (needs the Neo4j graph, `RA_GRAPH_ENABLED=true`) |
+| `ask_direct(repo, question)` | Asks a LangChain agent that reads the cloned files directly (no JSON index or graph; needs `ANTHROPIC_API_KEY`) |
 
 It also has one resource, `info://status`, which reports whether the API key, Ctags and
 the graph are ready.
@@ -381,6 +384,37 @@ with your own paths. `cwd` is the `backend` folder, so the server finds `.env` a
 
 Then ask the client, for example: "Index https://github.com/pallets/flask, then ask how
 routing works."
+
+## Direct analysis (no index)
+
+The Chat tab and `ask_question` first index a repository (Ctags JSON, and optionally a
+Neo4j graph) and then answer questions from that index plus the files. A second mode
+skips all of that: a LangChain agent in
+[`direct_agent.py`](backend/src/repo_analyzer/direct_agent.py) is given only the clone
+folder and four file tools (`repo_tree`, `list_files`, `read_file`, `search_code`).
+The tools stay inside the clone: paths that escape it, `.git`, `node_modules` and
+binaries are rejected.
+
+If the repository is already checked out (because you indexed it earlier, or a previous
+direct question cloned it), that folder is reused. Otherwise it is cloned with the same
+helper the indexer uses. No JSON index is read or written.
+
+Call it over HTTP (PowerShell):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/direct/ask -Method Post -ContentType "application/json" -Body '{"repo":"https://github.com/pallets/flask","question":"How does routing work?"}'
+```
+
+Or with curl:
+
+```bash
+curl -s http://127.0.0.1:8000/api/direct/ask \
+  -H "Content-Type: application/json" \
+  -d '{"repo":"https://github.com/pallets/flask","question":"How does routing work?"}'
+```
+
+The same path is the MCP tool `ask_direct`. There is no Chat-tab toggle for this mode
+yet; use the endpoint or the MCP tool.
 
 ## Benchmark
 

@@ -33,7 +33,13 @@ def services(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Services:
 async def test_lists_the_expected_tools() -> None:
     async with Client(mcp_server.mcp) as client:
         names = {tool.name for tool in await client.list_tools()}
-    assert names == {"list_repositories", "index_repositories", "ask_question", "trace_endpoint"}
+    assert names == {
+        "list_repositories",
+        "index_repositories",
+        "ask_question",
+        "trace_endpoint",
+        "ask_direct",
+    }
 
 
 async def test_index_list_and_ask(services: Services, fixture_repos: dict[str, Path]) -> None:
@@ -88,3 +94,27 @@ async def test_status_resource(services: Services) -> None:
     status = json.loads(contents[0].text)
     assert status["ctags_available"] is True
     assert status["graph_available"] is False
+
+
+
+async def test_ask_direct_reads_a_clone_without_indexing(
+    services: Services, fixture_repos: dict[str, Path]
+) -> None:
+    async with Client(mcp_server.mcp) as client:
+        result = await client.call_tool(
+            "ask_direct",
+            {"repo": str(fixture_repos["core-lib"]), "question": "What is this?"},
+        )
+    assert result.data == "It is a small library."
+    # The tool must not go through the indexer.
+    assert not services.settings.repos_dir.exists() or not any(
+        services.settings.repos_dir.glob("*.json")
+    )
+
+
+async def test_ask_direct_rejects_an_unknown_name(services: Services) -> None:
+    async with Client(mcp_server.mcp) as client:
+        result = await client.call_tool(
+            "ask_direct", {"repo": "no-such-repo", "question": "What is this?"}
+        )
+    assert result.data.startswith("Error:")

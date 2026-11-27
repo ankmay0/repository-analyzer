@@ -38,6 +38,8 @@ class Services:
     skills: SkillLibrary
     benchmark: BenchmarkService
     compare: CompareService
+    fetcher: RepoFetcher
+    model_factory: Callable[[], BaseChatModel]
     graph_store: GraphStore | None = None  # None unless RA_GRAPH_ENABLED
     graph_ws: str = ""
 
@@ -154,6 +156,8 @@ def build_services(
         skills=skills,
         benchmark=benchmark,
         compare=CompareService(benchmark, workspace),
+        fetcher=fetcher,
+        model_factory=make_model,
         graph_store=graph,
         graph_ws=graph_ws,
     )

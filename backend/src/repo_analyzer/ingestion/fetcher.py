@@ -125,6 +125,35 @@ class RepoFetcher:
             default_branch=_git_output(dest, "branch", "--show-current"),
         )
 
+    def existing_checkout(self, name: str) -> Path | None:
+        """Return the checkout folder for ``name`` if it already exists, else ``None``."""
+        if not _REPO_NAME.match(name):
+            raise InvalidRepositorySourceError(f"Unsupported repository name: {name!r}")
+        dest = self._checkouts_dir / name
+        return dest if dest.is_dir() else None
+
+    def ensure(self, source: str) -> RepoSnapshot:
+        """Return a local checkout of ``source``, cloning only if it is not already on disk.
+
+        Local paths are used in place (same as :meth:`fetch`). A remote URL reuses
+        ``checkouts/<name>`` when that folder already exists, so the direct agent
+        can read a clone the indexer already made without deleting it.
+        """
+        if self._is_local(source):
+            return self.fetch(source)
+        url, name = parse_remote_url(source, self._allowed_hosts)
+        dest = self._checkouts_dir / name
+        if dest.is_dir():
+            return RepoSnapshot(
+                name=name,
+                owner=url.rstrip("/").split("/")[-2],
+                source=url,
+                root=dest,
+                commit=_git_output(dest, "rev-parse", "HEAD"),
+                default_branch=_git_output(dest, "branch", "--show-current"),
+            )
+        return self.fetch(source)
+
     # -- internals -------------------------------------------------------------
 
     @staticmethod
